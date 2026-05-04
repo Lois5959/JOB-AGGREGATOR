@@ -3,7 +3,7 @@ from jose import jwt
 from datetime import datetime, timedelta
 
 
-pwd_contenue = CryptContext(schemes=["bcrypt"], deprecated = "auto")
+pwd_contenue = CryptContext(schemes=["bcrypt"], deprecated="auto", truncate_error=False)
 
 SECRET_KEY = "***SECRET-RETIRE***"
 ALGORITHM = "HS256"
