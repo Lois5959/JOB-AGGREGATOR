@@ -1,15 +1,16 @@
-# Étape 1 : Build de React (On utilise la version 20 ici 👇)
-FROM node:20 AS build
+# ---------- Étape 1 : build de l'application React ----------
+FROM node:22-alpine AS build
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 
-# Étape 2 : Serveur Nginx
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
+# ---------- Étape 2 : Nginx sert uniquement les fichiers statiques ----------
+FROM nginx:stable-alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1/healthz || exit 1

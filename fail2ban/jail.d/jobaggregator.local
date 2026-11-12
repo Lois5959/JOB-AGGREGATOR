@@ -1,0 +1,13 @@
+# Bannit pendant 10 minutes une IP qui rate 5 connexions en 10 minutes.
+# Avec chain = DOCKER-USER, le port testé est celui du conteneur (80 = Nginx, 8000 = API).
+[jobaggregator]
+enabled   = true
+filter    = jobaggregator
+logpath   = /var/log/jobaggregator/app.log
+backend   = polling
+port      = 80,443,8000
+maxretry  = 5
+findtime  = 600
+bantime   = 600
+banaction = iptables-multiport
+chain     = DOCKER-USER

@@ -1,67 +1,109 @@
+name: job-aggregator
+
+# Démarrage : docker compose up --build
+# Outils facultatifs : --profile tools (phpMyAdmin), --profile security (fail2ban, Linux uniquement)
+
 services:
   frontend:
     build: ./front-end
     ports:
       - "8082:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
     networks:
       - frontend_network
 
   backend:
     build: ./backend
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    # Exposé seulement sur la machine locale (doc interactive sur /docs) ; le public passe par Nginx.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     dns:
       - 8.8.8.8
       - 1.1.1.1
     environment:
       DB_HOST: db
-      WELOVEDEVS_API_KEY: ${WELOVEDEVS_API_KEY:-dummy_key}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jobaggregator}
+      MYSQL_USER: ${MYSQL_USER:-jobaggregator}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-db}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-30}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_WINDOW_SECONDS: ${LOGIN_WINDOW_SECONDS:-600}
+      WELOVEDEVS_API_KEY: ${WELOVEDEVS_API_KEY:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COLLECT_INTERVAL_MINUTES: ${COLLECT_INTERVAL_MINUTES:-30}
+      DEMO_DATA: ${DEMO_DATA:-auto}
+      WARMUP_MODEL: ${WARMUP_MODEL:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8082}
     volumes:
-      - ./backend/logs:/var/log/jobaggregator
+      - auth_logs:/var/log/jobaggregator
+      - hf_cache:/app/.cache/huggingface
+    restart: unless-stopped
     networks:
       - frontend_network
       - backend_network
 
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jobaggregator}
+      MYSQL_USER: ${MYSQL_USER:-jobaggregator}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-db}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - backend_network
+
   phpmyadmin:
-    image: phpmyadmin
-    restart: always
+    image: phpmyadmin:5.2
+    profiles: ["tools"]
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    environment:
+      PMA_HOST: db
     ports:
       - "127.0.0.1:8081:80"
     networks:
       - backend_network
-
-  db:
-    image: mysql:8.0
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-testroot}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-testdb}
-      MYSQL_USER: ${MYSQL_USER:-testuser}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-testpassword}
-    volumes:
-      - db_data:/var/lib/mysql
-      - ./data.sql:/docker-entrypoint-initdb.d/init.sql
-    networks:
-      - backend_network
+      - frontend_network
 
   fail2ban:
     image: crazymax/fail2ban:latest
+    profiles: ["security"]
     network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
     volumes:
-      - ./backend/logs:/var/log/jobaggregator
-      - ./etc/fail2ban/jail.local:/etc/fail2ban/jail.d/jobaggregator.local:ro
-      - ./etc/fail2ban/filter.d/jobaggregator.conf:/etc/fail2ban/filter.d/jobaggregator.conf:ro
+      - auth_logs:/var/log/jobaggregator:ro
+      - ./fail2ban/jail.d/jobaggregator.local:/data/jail.d/jobaggregator.local:ro
+      - ./fail2ban/filter.d/jobaggregator.conf:/data/filter.d/jobaggregator.conf:ro
+    restart: unless-stopped
 
 networks:
   frontend_network:
+  # Réseau interne : la base n'a aucun accès à Internet.
   backend_network:
+    internal: true
 
 volumes:
-  db_data: {}
+  db_data:
+  auth_logs:
+  hf_cache:
