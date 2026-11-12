@@ -1,0 +1,4 @@
+# Moteur de recommandation. Index PyTorch « CPU » : image ~4x plus légère que la version CUDA.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2,<3.0
+sentence-transformers>=3.0,<6.0

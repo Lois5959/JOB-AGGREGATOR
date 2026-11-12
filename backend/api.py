@@ -1,56 +1,129 @@
-import os
-import time
-import requests
-from datetime import datetime
+"""API FastAPI de Job Aggregator : offres, profils, candidatures, administration."""
 import asyncio
+import json
+import logging
+import os
+import threading
 from contextlib import asynccontextmanager
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Query
+from datetime import date
+from pathlib import Path
 from typing import Optional
-from database_api import (
-    inserer_database, get_user_by_email, get_filtered_jobs, get_stats,
-    update_user_profile, get_all_users, get_admin_jobs, delete_user, delete_job,
-    add_application, get_applications, get_monthly_stats_from_db
-)
-from feature_ia import get_matching_jobs
-from routes import router as auth_router
-from pydantic import BaseModel
+
+from email_validator import EmailNotValidError, validate_email
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-load_dotenv()
+import feature_ia
+from auth import ensure_self_or_admin, get_current_user, obtenir_mdp_hasher, require_admin
+from collector import collect_everything, collecte_activee
+from database_api import (
+    ROLE_ADMIN, add_application, count_offres, creer_utilisateur, delete_job, delete_user,
+    get_admin_jobs, get_all_users, get_applications, get_filtered_jobs, get_monthly_stats_from_db,
+    get_stats, get_user_by_email, inserer_database, ping_db, set_user_role, update_user_profile,
+)
+from routes import router as auth_router
 
-async def fetch_en_arriere_plan(interval_minutes: int):
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+                    format="%(asctime)s %(levelname)s %(name)s : %(message)s")
+logger = logging.getLogger("jobaggregator")
+
+COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "30"))
+CV_EXTENSIONS = {".pdf", ".doc", ".docx", ".odt"}
+CV_MAX_BYTES = 5 * 1024 * 1024
+DEMO_FILE = Path(__file__).with_name("demo_offers.json")
+
+
+# =====================================================================
+#                      DÉMARRAGE ET COLLECTE
+# =====================================================================
+
+def lancer_collecte() -> int:
+    """Collecte les offres WeLoveDevs et les insère. Renvoie le nombre d'offres reçues."""
+    offres = collect_everything()
+    if offres:
+        inserer_database(offres)
+    else:
+        logger.info("Collecte : aucune offre récupérée.")
+    return len(offres)
+
+
+async def boucle_collecte(interval_minutes: int):
     while True:
+        await asyncio.to_thread(lancer_collecte)
         await asyncio.sleep(interval_minutes * 60)
-        print(f"Lancement de la collecte (toutes les {interval_minutes} min)...")
-        offres = await asyncio.to_thread(collect_everything)
-        if offres:
-            await asyncio.to_thread(inserer_database, offres)
-            print(f"{len(offres)} nouvelles offres ont été ajoutées.")
-        else:
-            print("Aucune nouvelle donnée trouvée.")
+
+
+def creer_admin_initial():
+    """Crée (ou promeut) le compte admin défini par ADMIN_EMAIL / ADMIN_PASSWORD."""
+    email = os.getenv("ADMIN_EMAIL", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if not email or not password:
+        return
+    try:
+        validate_email(email, check_deliverability=False)
+    except EmailNotValidError as e:
+        logger.error("ADMIN_EMAIL invalide (%s) : compte admin non créé.", e)
+        return
+    existant = get_user_by_email(email)
+    if existant is None:
+        if creer_utilisateur(email, obtenir_mdp_hasher(password), "", nom="Administrateur", role_id=ROLE_ADMIN):
+            logger.info("Compte administrateur créé : %s", email)
+    elif int(existant.get("role_id") or 0) != ROLE_ADMIN:
+        set_user_role(email, ROLE_ADMIN)
+        logger.info("Compte %s promu administrateur.", email)
+
+
+def charger_offres_demo():
+    """Sans clé WeLoveDevs, remplit une base vide avec des offres fictives pour la démo."""
+    if os.getenv("DEMO_DATA", "auto").lower() == "never" or collecte_activee() or count_offres() > 0:
+        return
+    offres = json.loads(DEMO_FILE.read_text(encoding="utf-8"))
+    aujourd_hui = date.today().isoformat()
+    for offre in offres:
+        offre.setdefault("date", aujourd_hui)
+        offre.setdefault("source", "Démo")
+    inserer_database(offres)
+    logger.info("Base vide et collecte désactivée : %s offres de démonstration chargées.", len(offres))
+
+
+def initialiser():
+    for etape in (creer_admin_initial, charger_offres_demo):
+        try:
+            etape()
+        except Exception as e:
+            logger.error("Initialisation (%s) : %s", etape.__name__, e)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Démarrage du serveur : Lancement de la collecte automatique...")
-    offres = await asyncio.to_thread(collect_everything)
-    if offres:
-        await asyncio.to_thread(inserer_database, offres)
-        print(f"{len(offres)} offres ont été collectées et insérées.")
+    await asyncio.to_thread(initialiser)
+
+    taches = []
+    if collecte_activee():
+        logger.info("Collecte WeLoveDevs activée (toutes les %s min).", COLLECT_INTERVAL_MINUTES)
+        taches.append(asyncio.create_task(boucle_collecte(COLLECT_INTERVAL_MINUTES)))
     else:
-        print("Aucune donnée récupérée au démarrage.")
+        logger.info("Collecte désactivée : WELOVEDEVS_API_KEY non renseignée.")
 
-    tache_fond = asyncio.create_task(fetch_en_arriere_plan(30))
+    if os.getenv("WARMUP_MODEL", "true").lower() == "true":
+        threading.Thread(target=feature_ia.warmup, daemon=True).start()
+
     yield
-    print("Arrêt du serveur.")
-    tache_fond.cancel()
 
-app = FastAPI(lifespan=lifespan)
+    for tache in taches:
+        tache.cancel()
+    logger.info("Arrêt du serveur.")
+
+
+app = FastAPI(title="Job Aggregator API", version="1.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[o.strip() for o in os.getenv(
+        "CORS_ORIGINS", "http://localhost:8082,http://localhost:5173").split(",") if o.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -58,219 +131,152 @@ app.add_middleware(
 app.include_router(auth_router)
 
 
-@app.get("/api/recommendations/{email}")
-async def get_recommendations(email: str):
-    scored_jobs = get_matching_jobs(email)
-    return scored_jobs
+# =====================================================================
+#                          ROUTES PUBLIQUES
+# =====================================================================
 
 @app.get("/")
 def read_root():
     return {"status": "Job Aggregator API is running"}
 
-@app.post("/api/fetch")
-def trigger_fetch():
-    offres = collect_everything()
-    if offres:
-        inserer_database(offres)
-        return {"message": f"{len(offres)} offres collectées"}
-    return {"message": "Aucune nouvelle offre trouvée."}
 
-API_KEY  = os.getenv("WELOVEDEVS_API_KEY")
-BASE_URL = "https://epi-api.welovedevs.com/v1"
-HEADERS  = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
-
-def fetch_offers(page=2, limit=50):
-    try:
-        r = requests.get(BASE_URL, headers=HEADERS, params={"page": page, "limit": limit}, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"Erreur HTTP : {e}")
-        return None
-    finally:
-        time.sleep(1)
-
-
-def extract_location(raw_places) -> str:
-    if not raw_places:
-        return "Lieu non renseigné"
-
-    if isinstance(raw_places, list):
-        if len(raw_places) == 0:
-            return "Lieu non renseigné"
-        first = raw_places[0]
-        if isinstance(first, dict):
-            city = first.get("name") or first.get("label") or first.get("city") or ""
-            return city.strip() or "Lieu non renseigné"
-        return str(first).strip()
-
-    if isinstance(raw_places, str):
-        return raw_places.split(',')[0].strip()
-
-    return "Lieu non renseigné"
-
-
-def normalize(raw):
-    timesamp = raw.get("publishDate")
-    if timesamp:
-        date_objet = datetime.fromtimestamp(timesamp / 1000000)
-        date_finale = date_objet.strftime("%Y-%m-%d")
-    else:
-        date_finale = None
-
-    salary_dossier = raw.get("Salary") or raw.get("salary") or {}
-    salary_min = salary_dossier.get("min")
-    salary_max = salary_dossier.get("max")
-    salary_per_year_var = raw.get("Salary") or raw.get("salary") or {}
-    contract_type_var = raw.get("Job") or raw.get("job") or {}
-    titre = raw.get("title")
-
-    entreprise_nom = (raw.get("smallCompany") or {}).get("companyName") or "Entreprise non renseignée"
-    description = raw.get("descriptionPreview")
-
-    if titre is None or date_finale is None or entreprise_nom is None or description is None:
-        return None
-
-    raw_contract = contract_type_var.get("contractTypes")
-    contract_final = ", ".join(raw_contract) if isinstance(raw_contract, list) else (raw_contract or "Non communiqué")
-
-    raw_skills = raw.get("skillsList")
-    if isinstance(raw_skills, list):
-        skills_as_strings = [s.get("name") if isinstance(s, dict) else str(s) for s in raw_skills]
-        skills_final = ", ".join(skills_as_strings)
-    else:
-        skills_final = str(raw_skills) if raw_skills else ""
-
-    raw_places = raw.get("formattedPlaces")
-    location_finale = extract_location(raw_places)
-
-    return {
-        "titre"          : titre,
-        "entreprise_nom" : entreprise_nom,
-        "salaire_min"    : salary_min if salary_min else 0,
-        "salaire_max"    : salary_max if salary_max else 0,
-        "description"    : description,
-        "location"       : location_finale,
-        "date"           : date_finale,
-        "contract_type"  : contract_final,
-        "salary_per_year": salary_per_year_var.get("maxPerYear") or "Salaire non renseigné",
-        "competences"    : skills_final,
-        "source"         : "WeLoveDevs"
-    }
-
-def process_page(data_brute):
-    liste_offres = data_brute.get("values", [])
-    offres_nettoyees = []
-    for offre in liste_offres:
-        propre = normalize(offre)
-        if propre:
-            offres_nettoyees.append(propre)
-    return offres_nettoyees
-
-def collect_everything(max_pages=20):
-    toutes_les_offres = []
-    for num_page in range(1, max_pages + 1):
-        paquet_brut = fetch_offers(page=num_page, limit=50)
-        if not paquet_brut:
-            break
-        nouveau_paquet = process_page(paquet_brut)
-        toutes_les_offres.extend(nouveau_paquet)
-    return toutes_les_offres
+@app.get("/api/health")
+def health():
+    if ping_db():
+        return {"status": "ok", "database": "up"}
+    return JSONResponse(status_code=503, content={"status": "degraded", "database": "down"})
 
 
 @app.get("/api/dashboard/stats")
-async def dashboard_stats():
+def dashboard_stats():
     return get_stats()
 
+
 @app.get("/api/dashboard/jobs")
-async def dashboard_list(location: str = None, contract: str = None):
+def dashboard_list(location: Optional[str] = None, contract: Optional[str] = None):
     return get_filtered_jobs(location, contract)
 
-@app.get("/api/dashboard/user/{email}")
-async def dashboard_user_info(email: str):
-    user = get_user_by_email(email)
-    if user:
-        return {
-            "email"      : user["email"],
-            "nom"        : user["nom"],
-            "prenom"     : user["nom"],
-            "competences": user["competences"],
-            "role_id"    : user["role_id"]
-        }
-    return {"error": "Utilisateur non trouvé"}
 
-# Nouveau modèle pour inclure 'experience' envoyé depuis le frontend (ProfilePage)
+# =====================================================================
+#                ROUTES UTILISATEUR (jeton obligatoire)
+# =====================================================================
+
+@app.get("/api/dashboard/user/{email}")
+def dashboard_user_info(email: str, user: dict = Depends(get_current_user)):
+    ensure_self_or_admin(email, user)
+    db_user = get_user_by_email(email)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    nom = (db_user.get("nom") or "Utilisateur").strip()
+    return {
+        "email": db_user["email"],
+        "nom": nom,
+        "prenom": nom.split(" ", 1)[0],
+        "competences": db_user.get("competences") or "",
+        "role_id": db_user["role_id"],
+    }
+
+
 class UserProfileUpdate(BaseModel):
-    nom: str = None
-    competences: str = None
-    experience: str = None
+    nom: Optional[str] = Field(default=None, max_length=120)
+    competences: Optional[str] = Field(default=None, max_length=2000)
+    experience: Optional[str] = Field(default=None, max_length=120)
+
 
 @app.put("/api/dashboard/user/{email}")
-async def dashboard_user_update(email: str, profile_data: UserProfileUpdate):
-    success = update_user_profile(email, profile_data.nom, profile_data.competences)
-    if success:
-        return {"message": "Profil mis à jour avec succès"}
-    else:
-        raise HTTPException(
-            status_code=500,
-            detail="Erreur lors de la mise à jour en base de données"
-        )
+def dashboard_user_update(email: str, profile_data: UserProfileUpdate, user: dict = Depends(get_current_user)):
+    ensure_self_or_admin(email, user)
+    if not update_user_profile(email, profile_data.nom, profile_data.competences):
+        raise HTTPException(status_code=500, detail="Erreur lors de la mise à jour en base de données")
+    return {"message": "Profil mis à jour avec succès"}
 
-# Route pour alimenter le graphique avec les vraies statistiques de DB
+
 @app.get("/api/dashboard/stats/monthly")
-async def dashboard_monthly_stats(email: str = Query(...)):
-    stats = get_monthly_stats_from_db(email)
-    return stats
+def dashboard_monthly_stats(email: str = Query(...), user: dict = Depends(get_current_user)):
+    ensure_self_or_admin(email, user)
+    return get_monthly_stats_from_db(email)
 
 
-# =====================================================================
-#                      ROUTES API POUR L'ADMINISTRATION
-# =====================================================================
+@app.get("/api/recommendations/{email}")
+def get_recommendations(email: str, user: dict = Depends(get_current_user)):
+    ensure_self_or_admin(email, user)
+    return feature_ia.get_matching_jobs(email)
 
-@app.get("/api/admin/users")
-async def admin_get_users():
-    return get_all_users()
 
-@app.delete("/api/admin/users/{user_id}")
-async def admin_delete_user(user_id: int):
-    if delete_user(user_id):
-        return {"message": "Utilisateur supprimé avec succès"}
-    raise HTTPException(status_code=500, detail="Échec de la suppression de l'utilisateur")
-
-@app.get("/api/admin/jobs")
-async def admin_get_jobs():
-    return get_admin_jobs()
-
-@app.delete("/api/admin/jobs/{job_id}")
-async def admin_delete_job(job_id: int):
-    if delete_job(job_id):
-        return {"message": "Offre supprimée avec succès"}
-    raise HTTPException(status_code=500, detail="Échec de la suppression de l'offre")
-
-class ApplicationCreate(BaseModel):
-    user_email: str
-    job_id: int
-    company: str
-    position: str
-
-@app.post("/api/applications")
-async def create_application(
+@app.post("/api/applications", status_code=201)
+def create_application(
     user_email: str = Form(...),
     job_id: int = Form(...),
-    company: str = Form(...),
-    position: str = Form(...),
+    company: str = Form(..., max_length=255),
+    position: str = Form(..., max_length=255),
     message: Optional[str] = Form(None),
     cv: UploadFile = File(...),
-    motivation_letter: Optional[UploadFile] = File(None)
+    motivation_letter: Optional[UploadFile] = File(None),
+    user: dict = Depends(get_current_user),
 ):
-    success = add_application(user_email, job_id, company, position)
-    if success:
-        print(f"[TEST] Fichier CV reçu : {cv.filename}")
-        if motivation_letter:
-            print(f"[TEST] Lettre de motivation reçue : {motivation_letter.filename}")
-        return {"message": "Candidature enregistrée avec succès"}
-    raise HTTPException(status_code=500, detail="Erreur lors de l'envoi de la candidature")
+    ensure_self_or_admin(user_email, user)
+    for fichier in (cv, motivation_letter):
+        if fichier is None:
+            continue
+        if Path(fichier.filename or "").suffix.lower() not in CV_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Formats acceptés : PDF, DOC, DOCX ou ODT")
+        if fichier.size is not None and fichier.size > CV_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Fichier trop lourd (5 Mo maximum)")
+
+    if not add_application(user_email, job_id, company, position):
+        raise HTTPException(status_code=500, detail="Erreur lors de l'envoi de la candidature")
+    logger.info("Candidature de %s pour l'offre %s (CV : %s).", user_email, job_id, cv.filename)
+    return {"message": "Candidature enregistrée avec succès"}
+
 
 @app.get("/api/applications/{email}")
-async def read_applications(email: str):
+def read_applications(email: str, user: dict = Depends(get_current_user)):
+    ensure_self_or_admin(email, user)
     return get_applications(email)
+
+
+# =====================================================================
+#                ROUTES ADMINISTRATION (rôle admin vérifié en base)
+# =====================================================================
+
+@app.post("/api/fetch")
+def trigger_fetch(admin: dict = Depends(require_admin)):
+    if not collecte_activee():
+        raise HTTPException(status_code=400, detail="Collecte impossible : WELOVEDEVS_API_KEY non renseignée")
+    recues = lancer_collecte()
+    if recues:
+        return {"message": f"{recues} offres collectées"}
+    return {"message": "Aucune nouvelle offre trouvée."}
+
+
+@app.get("/api/admin/users")
+def admin_get_users(admin: dict = Depends(require_admin)):
+    return get_all_users()
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
+    moi = get_user_by_email(admin["email"])
+    if moi and moi.get("id") == user_id:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas supprimer votre propre compte")
+    resultat = delete_user(user_id)
+    if resultat is None:
+        raise HTTPException(status_code=500, detail="Échec de la suppression de l'utilisateur")
+    if not resultat:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    return {"message": "Utilisateur supprimé avec succès"}
+
+
+@app.get("/api/admin/jobs")
+def admin_get_jobs(admin: dict = Depends(require_admin)):
+    return get_admin_jobs()
+
+
+@app.delete("/api/admin/jobs/{job_id}")
+def admin_delete_job(job_id: int, admin: dict = Depends(require_admin)):
+    resultat = delete_job(job_id)
+    if resultat is None:
+        raise HTTPException(status_code=500, detail="Échec de la suppression de l'offre")
+    if not resultat:
+        raise HTTPException(status_code=404, detail="Offre introuvable")
+    return {"message": "Offre supprimée avec succès"}

@@ -1,328 +1,356 @@
-import mysql.connector
+"""Accès à la base MySQL. Toutes les requêtes sont paramétrées (aucune concaténation)."""
+import logging
 import os
+from contextlib import contextmanager
+from datetime import date, datetime
+
+import mysql.connector
 from dotenv import load_dotenv
-from datetime import datetime
-from collections import defaultdict
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+ROLE_UTILISATEUR = 1
+ROLE_ADMIN = 2
+MAX_OFFRES = 1000
+
+MOIS = {1: 'Janv.', 2: 'Févr.', 3: 'Mars', 4: 'Avril', 5: 'Mai', 6: 'Juin',
+        7: 'Juil.', 8: 'Août', 9: 'Sept.', 10: 'Oct.', 11: 'Nov.', 12: 'Déc.'}
+
 
 def get_db_connection():
-    """Helper pour centraliser la configuration de la connexion MySQL."""
+    """Centralise la configuration de la connexion MySQL (lue dans l'environnement)."""
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "db"),
+        port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("MYSQL_USER"),
         password=os.getenv("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DATABASE")
+        database=os.getenv("MYSQL_DATABASE"),
+        connection_timeout=5,
     )
 
 
-def inserer_database(offres_clean):
-    """Insère les offres d'emploi collectées dans la base de données."""
+@contextmanager
+def db_cursor(dictionary=False):
+    """Ouvre une connexion et un curseur, puis les ferme toujours, même en cas d'erreur."""
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=dictionary)
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-
-        insert_query = """
-            INSERT IGNORE INTO offres (titre, entreprise_nom, description, salaire_min, salaire_max, location, date, contract_type, source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
-        for offre in offres_clean:
-            try:
-                params = [
-                    str(offre.get("titre", "")),
-                    str(offre.get("entreprise_nom", "")),
-                    str(offre.get("description", "")),
-                    int(offre.get("salaire_min", 0)),
-                    int(offre.get("salaire_max", 0)),
-                    str(offre.get("location", "")),
-                    str(offre.get("date", "")),
-                    str(offre.get("contract_type", "")),
-                    str(offre.get("source", ""))
-                ]
-
-                cursor.execute(insert_query, tuple(params))
-                connection.commit()
-
-            except mysql.connector.Error as e:
-                print(f"Erreur sur une offre spécifique : {e}")
-                continue
-
+        yield connection, cursor
+    finally:
         cursor.close()
         connection.close()
-        print("Insertion réussie dans le SQL !")
 
-    except Exception as e:
-        print(f"Erreur globale lors de l'insertion : {e}")
 
-def creer_utilisateur(email, hashed_password, competences, nom="Utilisateur", role_id=1):
+def ping_db() -> bool:
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-
-        query = """
-            INSERT INTO utilisateurs (email, password, competences, role_id, nom)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        comp_text = competences if competences else ""
-        nom_text = nom.strip() if (nom and nom.strip() != "") else "Utilisateur"
-
-        cursor.execute(query, (email, hashed_password, comp_text, role_id, nom_text))
-        connection.commit()
-        cursor.close()
-        connection.close()
+        with db_cursor() as (_, cursor):
+            cursor.execute("SELECT 1")
+            cursor.fetchall()
         return True
     except Exception as e:
-        print(f"Erreur lors de la création du compte : {e}")
+        logger.warning("Base de données injoignable : %s", e)
         return False
+
+
+# =====================================================================
+#                              OFFRES
+# =====================================================================
+
+def inserer_database(offres_clean):
+    """Insère les offres collectées. Les doublons (titre + entreprise) sont ignorés."""
+    insert_query = """
+        INSERT IGNORE INTO offres
+            (titre, entreprise_nom, description, salaire_min, salaire_max,
+             location, date, contract_type, source, competences)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    inserees = 0
+    try:
+        with db_cursor() as (connection, cursor):
+            for offre in offres_clean:
+                try:
+                    cursor.execute(insert_query, (
+                        str(offre.get("titre", "")),
+                        str(offre.get("entreprise_nom", "")),
+                        str(offre.get("description", "")),
+                        int(offre.get("salaire_min") or 0),
+                        int(offre.get("salaire_max") or 0),
+                        str(offre.get("location", "")),
+                        str(offre.get("date", "")),
+                        str(offre.get("contract_type", "")),
+                        str(offre.get("source", "")),
+                        offre.get("competences") or None,
+                    ))
+                    inserees += cursor.rowcount
+                except mysql.connector.Error as e:
+                    logger.warning("Offre ignorée (%s) : %s", offre.get("titre"), e)
+            connection.commit()
+        logger.info("%s nouvelles offres insérées (%s reçues).", inserees, len(offres_clean))
+    except Exception as e:
+        logger.error("Erreur globale lors de l'insertion : %s", e)
+    return inserees
+
+
+def count_offres() -> int:
+    try:
+        with db_cursor() as (_, cursor):
+            cursor.execute("SELECT COUNT(*) FROM offres")
+            return int(cursor.fetchone()[0])
+    except Exception as e:
+        logger.error("Erreur comptage offres : %s", e)
+        return 0
+
 
 def get_all_jobs():
-    """Récupère la liste complète des offres."""
+    """Récupère toutes les offres (utilisé par le moteur de recommandation)."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM offres")
-        jobs = cursor.fetchall()
-        cursor.close()
-        connection.close()
-        return jobs
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT * FROM offres ORDER BY date DESC, id DESC LIMIT %s", (MAX_OFFRES,))
+            return cursor.fetchall()
     except Exception as e:
-        print(f"Erreur récupération jobs : {e}")
+        logger.error("Erreur récupération jobs : %s", e)
         return []
-
-def get_user_by_email(email):
-    """Récupère un utilisateur par son email pour l'authentification ou le profil."""
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        query = "SELECT * FROM utilisateurs WHERE email = %s"
-        cursor.execute(query, (email,))
-        user = cursor.fetchone()
-        cursor.close()
-        connection.close()
-        return user
-    except Exception as e:
-        print(f"Erreur recherche utilisateur : {e}")
-        return None
-
-def update_user_profile(email, nom, competences):
-    """Met à jour le nom et les compétences d'un utilisateur dans la base de données."""
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-
-        query = "UPDATE utilisateurs SET nom = %s, competences = %s WHERE email = %s"
-        cursor.execute(query, (nom, competences, email))
-
-        connection.commit()
-        cursor.close()
-        connection.close()
-        return True
-    except Exception as e:
-        print(f"Erreur lors de la mise à jour du profil : {e}")
-        return False
 
 
 def get_filtered_jobs(location: str = None, contract: str = None):
     """Récupère les offres filtrées pour le dashboard."""
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-
-        query = """
+    query = """
         SELECT id, titre, entreprise_nom, description,
-        salaire_min, salaire_max, location, date,
-        contract_type, competences, url
+               salaire_min, salaire_max, location, date,
+               contract_type, competences, url, source
         FROM offres
         WHERE 1=1
-        """
-        params = []
+    """
+    params = []
+    if location and location.strip() and location not in ("undefined", "null"):
+        query += " AND location LIKE %s"
+        params.append(f"%{location.strip()}%")
+    if contract and contract.strip() and contract not in ("undefined", "null"):
+        query += " AND contract_type LIKE %s"
+        params.append(f"%{contract.strip()}%")
+    query += " ORDER BY date DESC, id DESC LIMIT %s"
+    params.append(MAX_OFFRES)
 
-        if location and location.strip() != "" and location != "undefined" and location != "null":
-            query += " AND location LIKE %s"
-            params.append(f"%{location}%")
-
-        if contract and contract.strip() != "" and contract != "undefined" and contract != "null":
-            query += " AND contract_type LIKE %s"
-            params.append(f"%{contract}%")
-
-        cursor.execute(query, tuple(params))
-        jobs = cursor.fetchall()
-        cursor.close()
-        connection.close()
-        return jobs
+    try:
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute(query, tuple(params))
+            return cursor.fetchall()
     except Exception as e:
-        print(f"Erreur SQL filtre: {e}")
+        logger.error("Erreur SQL filtre : %s", e)
         return []
 
 
 def get_stats():
-    """Calcule les statistiques pour les compteurs du dashboard."""
+    """Calcule les compteurs du dashboard."""
+    query = """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN contract_type LIKE '%CDI%' THEN 1 ELSE 0 END) AS cdi_count
+        FROM offres
+    """
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-
-        query = """
-            SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN contract_type LIKE '%CDI%' THEN 1 ELSE 0 END) as cdi_count
-            FROM offres
-        """
-        cursor.execute(query)
-        stats = cursor.fetchone()
-        cursor.close()
-        connection.close()
-
-        if stats and stats['cdi_count'] is None:
-            stats['cdi_count'] = 0
-
-        return stats
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute(query)
+            stats = cursor.fetchone() or {}
+        return {"total": int(stats.get("total") or 0), "cdi_count": int(stats.get("cdi_count") or 0)}
     except Exception as e:
-        print(f"Erreur stats : {e}")
+        logger.error("Erreur stats : %s", e)
         return {"total": 0, "cdi_count": 0}
 
 
 # =====================================================================
-#                      FONCTIONS POUR LE PANEL ADMIN
+#                            UTILISATEURS
+# =====================================================================
+
+def creer_utilisateur(email, hashed_password, competences, nom="Utilisateur", role_id=ROLE_UTILISATEUR):
+    nom_text = nom.strip() if (nom and nom.strip()) else "Utilisateur"
+    try:
+        with db_cursor() as (connection, cursor):
+            cursor.execute(
+                "INSERT INTO utilisateurs (email, password, competences, role_id, nom) VALUES (%s, %s, %s, %s, %s)",
+                (email, hashed_password, competences or "", role_id, nom_text),
+            )
+            connection.commit()
+        return True
+    except Exception as e:
+        logger.error("Erreur lors de la création du compte : %s", e)
+        return False
+
+
+def get_user_by_email(email):
+    """Récupère un utilisateur par son email (authentification, profil)."""
+    try:
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT * FROM utilisateurs WHERE email = %s", (email,))
+            return cursor.fetchone()
+    except Exception as e:
+        logger.error("Erreur recherche utilisateur : %s", e)
+        return None
+
+
+def update_user_profile(email, nom=None, competences=None):
+    """Met à jour le nom et/ou les compétences. Un champ absent (None) reste inchangé."""
+    try:
+        with db_cursor() as (connection, cursor):
+            cursor.execute(
+                "UPDATE utilisateurs SET nom = COALESCE(%s, nom), competences = COALESCE(%s, competences) "
+                "WHERE email = %s",
+                (nom, competences, email),
+            )
+            connection.commit()
+        return True
+    except Exception as e:
+        logger.error("Erreur lors de la mise à jour du profil : %s", e)
+        return False
+
+
+def set_user_role(email, role_id):
+    try:
+        with db_cursor() as (connection, cursor):
+            cursor.execute("UPDATE utilisateurs SET role_id = %s WHERE email = %s", (role_id, email))
+            connection.commit()
+        return True
+    except Exception as e:
+        logger.error("Erreur lors du changement de rôle : %s", e)
+        return False
+
+
+# =====================================================================
+#                          PANEL ADMINISTRATION
 # =====================================================================
 
 def get_all_users():
-    """Récupère tous les utilisateurs enregistrés avec le nom de leur rôle."""
+    """Récupère tous les utilisateurs avec le nom de leur rôle (sans les mots de passe)."""
+    query = """
+        SELECT u.id, u.nom AS name, u.email, r.name AS role
+        FROM utilisateurs u
+        JOIN roles r ON u.role_id = r.id
+        ORDER BY u.id
+    """
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        query = """
-            SELECT u.id, u.nom AS name, u.email, r.name AS role
-            FROM utilisateurs u
-            JOIN roles r ON u.role_id = r.id
-        """
-        cursor.execute(query)
-        users = cursor.fetchall()
-        cursor.close()
-        connection.close()
-        return users
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute(query)
+            return cursor.fetchall()
     except Exception as e:
-        print(f"Erreur récupération globale des utilisateurs : {e}")
+        logger.error("Erreur récupération des utilisateurs : %s", e)
         return []
+
 
 def get_admin_jobs():
-    """Récupère toutes les offres d'emploi formatées pour le tableau d'administration."""
+    """Récupère les offres formatées pour le tableau d'administration."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        query = "SELECT id, titre AS title, entreprise_nom AS company, location AS city FROM offres"
-        cursor.execute(query)
-        jobs = cursor.fetchall()
-        cursor.close()
-        connection.close()
-        return jobs
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute(
+                "SELECT id, titre AS title, entreprise_nom AS company, location AS city "
+                "FROM offres ORDER BY date DESC, id DESC LIMIT %s",
+                (MAX_OFFRES,),
+            )
+            return cursor.fetchall()
     except Exception as e:
-        print(f"Erreur récupération globale des offres admin : {e}")
+        logger.error("Erreur récupération des offres admin : %s", e)
         return []
 
+
 def delete_user(user_id: int):
-    """Supprime définitivement un utilisateur de la base de données."""
+    """Supprime un utilisateur. True : supprimé, False : introuvable, None : erreur."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        query = "DELETE FROM utilisateurs WHERE id = %s"
-        cursor.execute(query, (user_id,))
-        connection.commit()
-        cursor.close()
-        connection.close()
-        return True
+        with db_cursor() as (connection, cursor):
+            cursor.execute("DELETE FROM utilisateurs WHERE id = %s", (user_id,))
+            connection.commit()
+            return cursor.rowcount > 0
     except Exception as e:
-        print(f"Erreur lors de la suppression de l'utilisateur {user_id} : {e}")
-        return False
+        logger.error("Erreur lors de la suppression de l'utilisateur %s : %s", user_id, e)
+        return None
+
 
 def delete_job(job_id: int):
-    """Supprime définitivement une offre d'emploi de la base de données."""
+    """Supprime une offre. True : supprimée, False : introuvable, None : erreur."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        query = "DELETE FROM offres WHERE id = %s"
-        cursor.execute(query, (job_id,))
-        connection.commit()
-        cursor.close()
-        connection.close()
-        return True
+        with db_cursor() as (connection, cursor):
+            cursor.execute("DELETE FROM offres WHERE id = %s", (job_id,))
+            connection.commit()
+            return cursor.rowcount > 0
     except Exception as e:
-        print(f"Erreur lors de la suppression de l'offre {job_id} : {e}")
-        return False
+        logger.error("Erreur lors de la suppression de l'offre %s : %s", job_id, e)
+        return None
+
+
+# =====================================================================
+#                             CANDIDATURES
+# =====================================================================
 
 def add_application(user_email, job_id, company, position):
     """Enregistre une nouvelle candidature."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        query = """
-            INSERT INTO candidatures (user_email, job_id, company, position, date, status, color)
-            VALUES (%s, %s, %s, %s, %s, 'En attente', 'orange')
-        """
-        cursor.execute(query, (user_email, job_id, company, position, date_str))
-        connection.commit()
-        cursor.close()
-        connection.close()
+        with db_cursor() as (connection, cursor):
+            cursor.execute(
+                "INSERT INTO candidatures (user_email, job_id, company, position, date, status, color) "
+                "VALUES (%s, %s, %s, %s, %s, 'En attente', 'orange')",
+                (user_email, job_id, company, position, date.today().isoformat()),
+            )
+            connection.commit()
         return True
     except Exception as e:
-        print(f"Erreur ajout candidature: {e}")
+        logger.error("Erreur ajout candidature : %s", e)
         return False
 
+
 def get_applications(user_email):
-    """Récupère les candidatures d'un utilisateur."""
+    """Récupère les candidatures d'un utilisateur, de la plus récente à la plus ancienne."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        query = "SELECT * FROM candidatures WHERE user_email = %s ORDER BY id DESC"
-        cursor.execute(query, (user_email,))
-        apps = cursor.fetchall()
-        cursor.close()
-        connection.close()
-        return apps
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT * FROM candidatures WHERE user_email = %s ORDER BY id DESC", (user_email,))
+            return cursor.fetchall()
     except Exception as e:
-        print(f"Erreur recup candidatures: {e}")
+        logger.error("Erreur récupération candidatures : %s", e)
         return []
+
+
+def _as_date(value):
+    """MySQL renvoie un objet date ; on accepte aussi une chaîne 'AAAA-MM-JJ'."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    return None
+
+
+def build_monthly_stats(applications, today=None):
+    """Regroupe les candidatures des 6 derniers mois (mois courant inclus)."""
+    today = today or date.today()
+    mois_cles = []
+    annee, mois = today.year, today.month
+    for _ in range(6):
+        mois_cles.append((annee, mois))
+        annee, mois = (annee - 1, 12) if mois == 1 else (annee, mois - 1)
+    mois_cles.reverse()
+
+    stats = {cle: {"mois": MOIS[cle[1]], "envoyees": 0, "acceptees": 0, "refusees": 0} for cle in mois_cles}
+    for app in applications:
+        try:
+            d = _as_date(app.get("date"))
+        except ValueError:
+            continue
+        if d is None or (d.year, d.month) not in stats:
+            continue
+        ligne = stats[(d.year, d.month)]
+        ligne["envoyees"] += 1
+        if app.get("status") == "Accepté":
+            ligne["acceptees"] += 1
+        elif app.get("status") == "Refusé":
+            ligne["refusees"] += 1
+    return list(stats.values())
+
 
 def get_monthly_stats_from_db(user_email):
-    """Calcule les statistiques des 6 derniers mois pour le graphique du dashboard."""
+    """Statistiques des 6 derniers mois pour le graphique du dashboard."""
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        query = "SELECT date, status FROM candidatures WHERE user_email = %s"
-        cursor.execute(query, (user_email,))
-        apps = cursor.fetchall()
-        cursor.close()
-        connection.close()
-
-        months_map = {1: 'Janv.', 2: 'Févr.', 3: 'Mars', 4: 'Avril', 5: 'Mai', 6: 'Juin',
-                      7: 'Juil.', 8: 'Août', 9: 'Sept.', 10: 'Oct.', 11: 'Nov.', 12: 'Déc.'}
-
-        # Initialiser les 6 derniers mois avec des 0
-        today = datetime.now()
-        stats_dict = {}
-        for i in range(5, -1, -1):
-            m = (today.month - i - 1) % 12 + 1
-            label = f"{months_map[m]}"
-            stats_dict[label] = {"mois": label, "envoyees": 0, "acceptees": 0, "refusees": 0}
-
-        # Remplir avec les vraies données
-        for app in apps:
-            try:
-                # La date est au format YYYY-MM-DD
-                d = datetime.strptime(app['date'], "%Y-%m-%d")
-                label = months_map[d.month]
-                if label in stats_dict:
-                    stats_dict[label]["envoyees"] += 1
-                    if app['status'] == 'Accepté':
-                        stats_dict[label]["acceptees"] += 1
-                    elif app['status'] == 'Refusé':
-                        stats_dict[label]["refusees"] += 1
-            except Exception:
-                continue
-
-        return list(stats_dict.values())
-
+        with db_cursor(dictionary=True) as (_, cursor):
+            cursor.execute("SELECT date, status FROM candidatures WHERE user_email = %s", (user_email,))
+            apps = cursor.fetchall()
     except Exception as e:
-        print(f"Erreur stats graphiques mensuelles: {e}")
-        return []
+        logger.error("Erreur stats mensuelles : %s", e)
+        apps = []
+    return build_monthly_stats(apps)
