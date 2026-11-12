@@ -1,18 +1,43 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import HomePage from './pages/Home';
 import Login from './pages/Auth';
-import Research from './pages/Research';
-import Dashboard from './pages/Dashboard';
-import NotificationsPage from "./pages/NotificationsPage";
-import SettingsPage from './pages/SettingsPage';
-import ProfilePage from './pages/ProfilePage';
-import AdminPage from './pages/AdminPage';
 import Sidebar from './pages/Sidebar';
+
+// Pages chargées à la demande : le bundle initial ne contient que l'accueil et la connexion.
+const Research = lazy(() => import('./pages/Research'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const ProfilePage = lazy(() => import('./pages/ProfilePage'));
+const AdminPage = lazy(() => import('./pages/AdminPage'));
 import { translations } from './Trad';
+import { apiFetch, clearToken, readToken, SESSION_EXPIRED_EVENT } from './lib/api';
+import { EMPTY_USER, type NavigateTarget, type Page, type UserData } from './lib/types';
+
+function userFromToken(): UserData {
+  const payload = readToken();
+  return payload ? { ...EMPTY_USER, email: payload.sub, role_id: payload.role_id } : EMPTY_USER;
+}
+
+// Récupère le profil (nom, compétences, rôle) de l'utilisateur connecté.
+async function fetchProfile(email: string): Promise<Partial<UserData> | null> {
+  const response = await apiFetch(`/api/dashboard/user/${encodeURIComponent(email)}`);
+  if (!response.ok) return null;
+  const data = await response.json();
+  const nomComplet = (data.nom || "Utilisateur").trim();
+  return {
+    email,
+    nom: nomComplet,
+    name: nomComplet,
+    prenom: nomComplet.split(' ')[0] || "Utilisateur",
+    competences: data.competences || "",
+    role_id: data.role_id || 1,
+  };
+}
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<'home' | 'login' | 'research' | 'dashboard' | 'notifs' | 'settings' | 'profile' | 'admin'>('home');
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [currentPage, setCurrentPage] = useState<Page>('home');
+  const [isLoggedIn, setIsLoggedIn] = useState(() => readToken() !== null);
   const [savedJobs, setSavedJobs] = useState<number[]>([]);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
@@ -20,16 +45,7 @@ function App() {
   // Nouvel état pour savoir si l'utilisateur vient de s'inscrire ou se connecte normalement
   const [isNewUser, setIsNewUser] = useState(false);
 
-  const [userData, setUserData] = useState<any>({
-    name: "",
-    nom: "",
-    prenom: "",
-    email: "",
-    competences: "",
-    experience: "Junior (0-2 ans)",
-    avatar: null,
-    role_id: 1
-  });
+  const [userData, setUserData] = useState<UserData>(userFromToken);
 
   const [homeFilters, setHomeFilters] = useState({ role: '', city: '' });
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
@@ -45,99 +61,57 @@ function App() {
     document.body.className = `theme-${theme} access-${accessibility}`;
   }, [theme, accessibility, language]);
 
-  useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      setIsLoggedIn(false);
-      return;
-    }
-    try {
-      const payload = JSON.parse(atob(token.split('.')[1]));
-      const isExpired = payload.exp && payload.exp * 1000 < Date.now();
-      if (isExpired) {
-        localStorage.removeItem('token');
-        setIsLoggedIn(false);
-      } else {
-        setUserData((prev: any) => ({ ...prev, email: payload.sub, role_id: payload.role_id }));
-        setIsLoggedIn(true);
-
-        // Récupération du profil complet au chargement de l'app
-        fetch(`/api/dashboard/user/${payload.sub}`)
-          .then(res => res.json())
-          .then(userDataResp => {
-            const nomComplet = userDataResp.nom || "Utilisateur";
-            const parties = nomComplet.trim().split(' ', 1);
-            const prenom = parties[0] || "Utilisateur";
-
-            setUserData((prev: any) => ({
-              ...prev,
-              nom: nomComplet,
-              name: nomComplet,
-              prenom: prenom,
-              competences: userDataResp.competences || ""
-            }));
-          })
-          .catch(e => console.error("Erreur de récupération du profil", e));
-      }
-    } catch {
-      localStorage.removeItem('token');
-      setIsLoggedIn(false);
-    }
-  }, []);
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
+  const handleLogout = useCallback(() => {
+    clearToken();
     setIsLoggedIn(false);
     setIsNewUser(false);
     setSelectedJobId(null);
-    setUserData({
-      name: "",
-      nom: "",
-      prenom: "",
-      email: "",
-      competences: "",
-      experience: "Junior (0-2 ans)",
-      avatar: null,
-      role_id: 1
-    });
+    setUserData(EMPTY_USER);
     setCurrentPage('home');
-  };
+  }, []);
 
-  const handleNavigation = (page: string | { page: string; jobId: number }) => {
-    if (typeof page === 'object') {
-      if (page.page === 'research') {
-        setSelectedJobId(page.jobId);
-        setCurrentPage('research');
-      }
+  // Au chargement : si un jeton valide est présent, on complète le profil.
+  useEffect(() => {
+    const payload = readToken();
+    if (!payload) {
+      clearToken();
       return;
     }
-    if (page === 'logout') {
+    fetchProfile(payload.sub)
+      .then(profile => {
+        if (profile) setUserData(prev => ({ ...prev, ...profile }));
+      })
+      .catch(e => console.error("Erreur de récupération du profil", e));
+  }, []);
+
+  // Le serveur a refusé le jeton (expiré ou invalide) : retour à l'accueil, déconnecté.
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleLogout);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleLogout);
+  }, [handleLogout]);
+
+  const handleNavigation = (target: NavigateTarget) => {
+    if (typeof target === 'object') {
+      setSelectedJobId(target.jobId);
+      setCurrentPage('research');
+      return;
+    }
+    if (target === 'logout') {
       handleLogout();
     } else {
       setSelectedJobId(null);
-      setCurrentPage(page as any);
+      setCurrentPage(target);
     }
   };
 
-  const handleLoginSuccess = async (email: string, isRegister: boolean = false) => {
+  const handleLoginSuccess = async (email: string, isRegister: boolean = false, fallbackName?: string) => {
+    const nom = fallbackName || "Utilisateur";
+    const base: UserData = { ...EMPTY_USER, email, nom, name: nom, prenom: nom.split(' ')[0], role_id: readToken()?.role_id || 1 };
     try {
-      const userResponse = await fetch(`/api/dashboard/user/${email}`);
-      const userDataResp = await userResponse.json();
-
-      const nomComplet = userDataResp.nom || "Utilisateur";
-      // Extrait uniquement le prénom (premier mot du nom complet)
-      const prenom = nomComplet.trim().split(' ')[0] || "Utilisateur";
-
-      setUserData({
-        email: email,
-        nom: nomComplet,
-        name: nomComplet,
-        prenom: prenom,
-        competences: userDataResp.competences || "",
-        role_id: userDataResp.role_id || 1
-      });
-    } catch (e) {
-      setUserData({ email, nom: "Utilisateur", name: "Utilisateur", prenom: "Utilisateur", competences: "", role_id: 1 });
+      const profile = await fetchProfile(email);
+      setUserData({ ...base, ...profile });
+    } catch {
+      setUserData(base);
     }
     setIsNewUser(isRegister);
     setIsLoggedIn(true);
@@ -169,8 +143,8 @@ function App() {
         />
       )}
 
-      {/* LA BALISE MANQUANTE ÉTAIT CELLE-CI : */}
       <div className="app-page-content" style={{ flex: 1, width: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Suspense fallback={<p style={{ padding: '40px', textAlign: 'center' }}>Chargement…</p>}>
 
         {currentPage === 'home' && (
           <HomePage
@@ -269,6 +243,7 @@ function App() {
             </button>
           </div>
         )}
+        </Suspense>
       </div>
     </div>
   );

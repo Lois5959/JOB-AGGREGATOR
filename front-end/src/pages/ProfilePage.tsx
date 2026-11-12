@@ -1,13 +1,18 @@
 import React, { useState, useRef } from 'react';
 import './ProfilePage.css';
 import { Camera, Check, Plus, X, Search } from "lucide-react";
+import { apiFetch } from '../lib/api';
+import type { NavigateFn, Translation, UserData } from '../lib/types';
 
 interface ProfileProps {
-  onNavigate: (page: string) => void;
-  userData: any;
-  setUserData: (data: any) => void;
-  t: any;
+  onNavigate: NavigateFn;
+  userData: UserData;
+  setUserData: (data: UserData) => void;
+  t: Translation;
 }
+
+// Brouillon du formulaire : les compétences sont manipulées sous forme de liste.
+type ProfileDraft = Omit<UserData, 'competences'> & { competences: string[] };
 
 const ALL_SKILLS = [
   "JavaScript", "TypeScript", "Python", "Java", "C", "C++", "C#", "Ruby", "PHP", "Swift", "Kotlin", "Go", "Rust", "Dart", "Scala", "Elixir", "Haskell", "Lua", "Perl", "R", "Objective-C", "SQL", "NoSQL", "Bash", "Shell", "PowerShell", "HTML", "CSS", "Sass", "Less",
@@ -18,14 +23,9 @@ const ALL_SKILLS = [
   "React Native", "Flutter", "Ionic", "Xamarin", "Android", "iOS", "Unity", "Unreal Engine", "Figma", "WordPress", "Shopify", "Magento", "Web3", "Solidity", "Smart Contracts", "Machine Learning", "TensorFlow", "PyTorch", "Pandas", "Scikit-Learn", "Data Science", "Data Engineering", "Hadoop", "Spark", "Kafka", "RabbitMQ"
 ].sort();
 
-const ProfilePage: React.FC<ProfileProps> = ({ onNavigate, userData, setUserData, t }) => {
-  const [tempData, setTempData] = useState<any>(() => {
-    let compArray: string[] = [];
-    if (userData?.competences) {
-      compArray = typeof userData.competences === 'string'
-        ? userData.competences.split(',').map((s: string) => s.trim()).filter(Boolean)
-        : userData.competences;
-    }
+const ProfilePage: React.FC<ProfileProps> = ({ userData, setUserData }) => {
+  const [tempData, setTempData] = useState<ProfileDraft>(() => {
+    const compArray = (userData?.competences || '').split(',').map(s => s.trim()).filter(Boolean);
     return {
       ...userData,
       nom: userData?.nom || "Utilisateur",
@@ -59,7 +59,7 @@ const ProfilePage: React.FC<ProfileProps> = ({ onNavigate, userData, setUserData
     setSaveStatus('saving');
     const skillsString = tempData.competences.join(', ');
     try {
-      const response = await fetch(`/api/dashboard/user/${tempData.email}`, {
+      const response = await apiFetch(`/api/dashboard/user/${encodeURIComponent(tempData.email)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nom: tempData.nom, competences: skillsString }),

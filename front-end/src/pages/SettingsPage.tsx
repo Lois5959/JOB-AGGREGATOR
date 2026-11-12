@@ -1,17 +1,18 @@
 import React from 'react';
 import './SettingsPage.css';
 import { Sun, Eye, Languages, Volume2 } from "lucide-react";
+import type { NavigateFn, Translation, UserData } from '../lib/types';
 
 interface SettingsProps {
-  onNavigate: (page: any) => void;
+  onNavigate: NavigateFn;
   theme: string;
   setTheme: (t: string) => void;
   accessibility: string;
   setAccessibility: (a: string) => void;
   language: string;
   setLanguage: (l: string) => void;
-  t: any;
-  userData: any;
+  t: Translation;
+  userData: UserData;
 }
 
 const SettingsPage: React.FC<SettingsProps> = ({

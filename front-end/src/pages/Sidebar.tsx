@@ -3,18 +3,19 @@ import './Sidebar.css';
 import { 
   LayoutDashboard, Briefcase, Bell, Settings, LogOut, Home, User, ShieldCheck, Menu, X 
 } from "lucide-react";
+import type { NavigateFn, Page, Translation, UserData } from '../lib/types';
 
 interface SidebarProps {
-  onNavigate: (page: string) => void;
-  userData: any;
+  onNavigate: NavigateFn;
+  userData: UserData;
   currentPage: string;
-  t: any;
+  t: Translation;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ onNavigate, userData, currentPage, t }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const handleNavClick = (page: string) => {
+  const handleNavClick = (page: Page | 'logout') => {
     onNavigate(page);
     setIsMobileMenuOpen(false);
   };
@@ -70,7 +71,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onNavigate, userData, currentPage, t 
             {userData?.avatar ? (
               <img src={userData.avatar} alt="Profil" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} />
             ) : (
-              userData?.nom?.charAt(0) || userData?.name?.charAt(0) || "U"
+              (userData?.nom || userData?.name || "U").charAt(0).toUpperCase()
             )}
           </div>
           <div className="user-meta">

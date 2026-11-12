@@ -2,14 +2,12 @@ import React, { useState } from 'react';
 import './NotificationsPage.css';
 import { Info, CheckCircle, AlertTriangle, Trash2, BellOff } from 'lucide-react';
 
+import type { NavigateFn, Translation, UserData } from '../lib/types';
+
 interface NotificationsPageProps {
-  onNavigate: (page: any) => void;
-  t?: any; 
-  userData?: {
-    name?: string;
-    avatar?: string | null;
-    [key: string]: any;
-  };
+  onNavigate: NavigateFn;
+  t?: Translation;
+  userData?: UserData;
 }
 
 const initialNotifications = [
@@ -18,11 +16,8 @@ const initialNotifications = [
   { id: 3, type: 'warning', title: 'Complétez votre profil', message: 'Ajoutez vos compétences en base de données pour attirer 3x plus de recruteurs.', time: 'Hier', unread: false },
 ];
 
-const NotificationsPage: React.FC<NotificationsPageProps> = ({
-  onNavigate,
-  t = {}, 
-  userData = {} 
-}) => {
+// Les notifications sont pour l'instant des exemples statiques (pas encore de route côté API).
+const NotificationsPage: React.FC<NotificationsPageProps> = ({ t = {} }) => {
   const [notifications, setNotifications] = useState(initialNotifications);
 
   const handleDelete = (id: number) => {

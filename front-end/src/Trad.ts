@@ -1,6 +1,8 @@
 // src/Trad.ts
 
-export const translations: any = {
+import type { Translation } from './lib/types';
+
+export const translations: Record<string, Translation> = {
   fr: {
     // Commun / Sidebar
     home: "Accueil",

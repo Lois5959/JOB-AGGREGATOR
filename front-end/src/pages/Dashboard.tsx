@@ -8,33 +8,45 @@ import {
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
+import { apiFetch, formatSalary } from '../lib/api';
+import type { Application, Job, NavigateFn, Translation, UserData } from '../lib/types';
+
+interface MonthlyStat {
+  mois: string;
+  envoyees: number;
+  acceptees: number;
+  refusees: number;
+}
 
 interface DashboardProps {
-  onNavigate: (page: any) => void;
-  t: any;
+  onNavigate: NavigateFn;
+  t: Translation;
   savedJobs: number[];
-  userData: any;
+  userData: UserData;
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ onNavigate, t, savedJobs, userData }) => {
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [applications, setApplications] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [monthly, setMonthly] = useState<MonthlyStat[]>([]);
 
   useEffect(() => {
-    fetch("http://localhost:8000/api/dashboard/jobs")
+    apiFetch("/api/dashboard/jobs")
       .then(res => res.json())
-      .then(data => setJobs(data))
+      .then(data => { if (Array.isArray(data)) setJobs(data); })
       .catch(err => console.error("Erreur chargement jobs:", err));
 
     if (userData?.email) {
-      fetch(`http://localhost:8000/api/applications/${encodeURIComponent(userData.email)}`)
+      const email = encodeURIComponent(userData.email);
+      apiFetch(`/api/applications/${email}`)
         .then(res => res.json())
-        .then(data => {
-          if (Array.isArray(data)) {
-            setApplications(data);
-          }
-        })
+        .then(data => { if (Array.isArray(data)) setApplications(data); })
         .catch(err => console.error("Erreur chargement candidatures:", err));
+
+      apiFetch(`/api/dashboard/stats/monthly?email=${email}`)
+        .then(res => res.json())
+        .then(data => { if (Array.isArray(data)) setMonthly(data); })
+        .catch(err => console.error("Erreur chargement statistiques:", err));
     }
   }, [userData?.email]);
 
@@ -47,21 +59,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, t, savedJobs, userDat
     refusees: applications.filter(app => app.status === "Refusé").length
   };
 
-  // --- PRÉPARATION DES DONNÉES DU GRAPHIQUE ---
-  // On crée un tableau avec des 0 par défaut pour faire joli
-  const dataBarres = [
-    { mois: 'Janv.', postulees: 0, positives: 0 },
-    { mois: 'Févr.', postulees: 0, positives: 0 },
-    { mois: 'Mars', postulees: 0, positives: 0 },
-    { mois: 'Avril', postulees: 0, positives: 0 },
-    { mois: 'Mai', postulees: 0, positives: 0 },
-    { mois: 'Juin', postulees: 0, positives: 0 } // On va lier ce dernier mois à vos vraies données !
-  ];
-
-  // On remplit le mois en cours avec le VRAI total de vos candidatures
-  // Si vous avez 0 candidature (applications.length === 0), ça restera à 0 !
-  dataBarres[5].postulees = applications.length;
-  dataBarres[5].positives = applications.filter(app => app.status === "Accepté").length;
+  // Graphique : candidatures des 6 derniers mois, calculées par l'API.
+  const dataBarres = monthly.map(m => ({ mois: m.mois, postulees: m.envoyees, positives: m.acceptees }));
 
   return (
     <div className="dash-container">
@@ -205,8 +204,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, t, savedJobs, userDat
                       </td>
                       <td>{job.titre}</td>
                       <td className="text-muted">{job.location}</td>
-                      <td><span className="salary-tag" style={{color: '#22c55e'}}>{job.salaire_min > 0 ? `${job.salaire_min}k€` : "Non communiqué"}</span></td>
-                      <td><button className="btn-view" onClick={() => onNavigate('research')}>{t.viewOfferBtn || "Voir l'offre"}</button></td>
+                      <td><span className="salary-tag" style={{color: '#22c55e'}}>{formatSalary(job.salaire_min, job.salaire_max)}</span></td>
+                      <td><button className="btn-view" onClick={() => onNavigate({ page: 'research', jobId: job.id })}>{t.viewOfferBtn || "Voir l'offre"}</button></td>
                     </tr>
                   ))}
                 </tbody>

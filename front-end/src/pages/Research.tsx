@@ -2,24 +2,22 @@ import React, { useState, useEffect, useRef } from 'react';
 import './Research.css';
 import {
   Search, MapPin, DollarSign, Clock, Sparkles,
-  Building2, Share2, Bookmark, Users, Star, ArrowRight, X, ArrowLeft
+  Building2, Share2, Bookmark, ArrowRight, X, ArrowLeft
 } from "lucide-react";
+import { apiFetch, errorMessage, formatSalary, initials } from '../lib/api';
+import type { Job, NavigateFn, Translation, UserData } from '../lib/types';
 
-export const jobs = [
-  {
-    id: 1, title: "Senior Frontend Developer", company: "TechVision", logo: "TV", location: "Paris", salary: "55-70k€", type: "CDI", remote: true, new: true, postedDate: "Il y a 2 jours", description: "Nous recherchons un développeur Frontend senior passionné par React et TypeScript pour rejoindre notre équipe produit en pleine croissance.", requirements: ["React", "TypeScript", "Next.js", "Tailwind CSS", "GraphQL"], aiSummary: "Poste senior avec focus sur l'architecture frontend moderne. Stack technique alignée avec votre profil.", experience: "5+ ans", teamSize: 8, applicants: 34, rating: 4.8, benefits: ["Télétravail flexible", "Formation continue", "Mutuelle premium"], companyDescription: "TechVision est une scale-up française spécialisée dans les solutions SaaS pour l'e-commerce.",
-  },
-  {
-    id: 2, title: "DevOps Engineer", company: "CloudStack", logo: "CS", location: "Lyon", salary: "60-75k€", type: "CDI", remote: false, new: false, postedDate: "Il y a 5 jours", description: "Rejoignez notre équipe DevOps pour gérer notre infrastructure cloud.", requirements: ["Kubernetes", "AWS", "Docker", "Terraform"], aiSummary: "Infrastructure à grande échelle. Migration AWS en cours.", experience: "3-5 ans", teamSize: 12, applicants: 28, rating: 4.6, benefits: ["RTT", "Matériel pro", "Conférences tech"], companyDescription: "CloudStack accompagne les grandes entreprises dans leur transformation cloud.",
-  }
-];
+const CV_FORMATS = ".pdf,.doc,.docx,.odt";
+
+const formatDate = (date?: string | null) =>
+  date ? new Date(date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }) : "récemment";
 
 interface ResearchProps {
-  onNavigate: (page: any) => void;
-  t: any;
+  onNavigate: NavigateFn;
+  t: Translation;
   savedJobs: number[];
   setSavedJobs: React.Dispatch<React.SetStateAction<number[]>>;
-  userData: any;
+  userData: UserData;
   homeFilters: { role: string; city: string };
   setHomeFilters: (filters: { role: string; city: string }) => void;
   selectedJobId?: number | null;
@@ -28,10 +26,11 @@ interface ResearchProps {
 const Research: React.FC<ResearchProps> = ({
   onNavigate, t, savedJobs, setSavedJobs, userData, homeFilters, setHomeFilters, selectedJobId
 }) => {
-  const [backendJobs, setBackendJobs] = useState<any[]>([]);
-  const [selectedJob, setSelectedJob] = useState<any>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [locationQuery, setLocationQuery] = useState("");
+  const [backendJobs, setBackendJobs] = useState<Job[]>([]);
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  // Les filtres saisis sur l'accueil pré-remplissent la recherche.
+  const [searchQuery, setSearchQuery] = useState(() => homeFilters?.role || "");
+  const [locationQuery, setLocationQuery] = useState(() => homeFilters?.city || "");
   const [filterType, setFilterType] = useState("all");
 
   const [showApplyModal, setShowApplyModal] = useState(false);
@@ -39,57 +38,52 @@ const Research: React.FC<ResearchProps> = ({
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [motivationFile, setMotivationFile] = useState<File | null>(null);
   const [isApplying, setIsApplying] = useState(false);
-  const [isMobileDetailsOpen, setIsMobileDetailsOpen] = useState(false);
+  const [isMobileDetailsOpen, setIsMobileDetailsOpen] = useState(() => selectedJobId != null);
 
   const jobCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const listContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // Connecté : offres triées par l'IA selon le profil. Sinon : toutes les offres.
   useEffect(() => {
-    const fetchUrl = userData?.email
-      ? `http://localhost:8000/api/recommendations/${encodeURIComponent(userData.email)}`
-      : 'http://localhost:8000/api/dashboard/jobs';
+    const url = userData?.email
+      ? `/api/recommendations/${encodeURIComponent(userData.email)}`
+      : '/api/dashboard/jobs';
 
-    fetch(fetchUrl)
+    apiFetch(url)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
           setBackendJobs(data);
-          if (data.length > 0) setSelectedJob(data[0]);
+          setSelectedJob(data.find((j: Job) => j.id === selectedJobId) ?? data[0] ?? null);
         }
       })
       .catch(err => console.error("ERREUR API :", err));
-  }, [userData?.email]);
+  }, [userData?.email, selectedJobId]);
 
+  // Offre ouverte depuis la carte de l'accueil : on la fait défiler et clignoter.
   useEffect(() => {
     if (!selectedJobId || backendJobs.length === 0) return;
-    const job = backendJobs.find(j => j.id === selectedJobId);
-    if (job) {
-      setSelectedJob(job);
-      setIsMobileDetailsOpen(true);
-      setTimeout(() => {
-        const card = jobCardRefs.current[selectedJobId];
-        if (card && listContainerRef.current) {
-          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          card.classList.add('highlight-flash');
-          setTimeout(() => card.classList.remove('highlight-flash'), 1500);
-        }
-      }, 100);
-    }
+    const timer = setTimeout(() => {
+      const card = jobCardRefs.current[selectedJobId];
+      if (card && listContainerRef.current) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('highlight-flash');
+        setTimeout(() => card.classList.remove('highlight-flash'), 1500);
+      }
+    }, 100);
+    return () => clearTimeout(timer);
   }, [selectedJobId, backendJobs]);
 
+  // Les filtres de l'accueil ont été repris : on les vide pour la prochaine visite.
   useEffect(() => {
-    if (homeFilters?.role || homeFilters?.city) {
-      if (homeFilters.role) setSearchQuery(homeFilters.role);
-      if (homeFilters.city) setLocationQuery(homeFilters.city);
-      setHomeFilters({ role: '', city: '' });
-    }
+    if (homeFilters?.role || homeFilters?.city) setHomeFilters({ role: '', city: '' });
   }, [homeFilters, setHomeFilters]);
 
   const toggleSaveJob = (id: number) => {
     setSavedJobs(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
   };
 
-  const handleSelectJob = (job: any) => {
+  const handleSelectJob = (job: Job) => {
     setSelectedJob(job);
     setIsMobileDetailsOpen(true);
   };
@@ -107,7 +101,7 @@ const Research: React.FC<ResearchProps> = ({
       return;
     }
 
-    if (!cvFile) {
+    if (!cvFile || !selectedJob) {
       alert("Veuillez sélectionner votre CV avant d'envoyer.");
       return;
     }
@@ -116,16 +110,16 @@ const Research: React.FC<ResearchProps> = ({
     try {
       const formData = new FormData();
       formData.append("user_email", userData.email);
-      formData.append("job_id", selectedJob.id);
-      formData.append("company", selectedJob.entreprise_nom || selectedJob.company);
-      formData.append("position", selectedJob.titre || selectedJob.title);
+      formData.append("job_id", String(selectedJob.id));
+      formData.append("company", selectedJob.entreprise_nom);
+      formData.append("position", selectedJob.titre);
       formData.append("message", coverLetter);
       formData.append("cv", cvFile);
       if (motivationFile) {
         formData.append("motivation_letter", motivationFile);
       }
 
-      const response = await fetch("http://localhost:8000/api/applications", {
+      const response = await apiFetch("/api/applications", {
         method: "POST",
         body: formData
       });
@@ -137,7 +131,7 @@ const Research: React.FC<ResearchProps> = ({
         setCvFile(null);
         setMotivationFile(null);
       } else {
-        alert("Une erreur est survenue lors de l'envoi.");
+        alert(await errorMessage(response, "Une erreur est survenue lors de l'envoi."));
       }
     } catch (error) {
       console.error(error);
@@ -191,24 +185,25 @@ const Research: React.FC<ResearchProps> = ({
           {filteredJobs.map(job => (
             <div key={job.id} ref={el => { jobCardRefs.current[job.id] = el; }} className={`job-card-mini ${selectedJob && selectedJob.id === job.id ? 'active' : ''}`} onClick={() => handleSelectJob(job)}>
               <div className="card-head">
-                <div className="c-logo">{job.logo || "DB"}</div>
+                <div className="c-logo">{initials(job.entreprise_nom)}</div>
                 <div className="c-info">
-                  <h4>{job.titre || job.title}</h4>
-                  <p>{job.entreprise_nom || job.company}</p>
+                  <h4>{job.titre}</h4>
+                  <p>{job.entreprise_nom}</p>
                 </div>
                 <Bookmark size={18} className={`save-icon ${savedJobs.includes(job.id) ? 'saved' : ''}`} onClick={(e) => { e.stopPropagation(); toggleSaveJob(job.id); }} />
               </div>
               <div className="card-tags">
                 <span><MapPin size={12} /> {job.location}</span>
-                <span><DollarSign size={12} /> {job.salaire_min > 0 ? `${job.salaire_min}k€` : (job.salary || "Non communiqué")}</span>
+                <span><DollarSign size={12} /> {formatSalary(job.salaire_min, job.salaire_max)}</span>
               </div>
-              <div className="ai-mini-match">
-                <Sparkles size={14} />
-                <span>{Math.round(job.matching_score || 85)}% {t.aiMatchLabel || "de compatibilité"}</span>
-              </div>
+              {typeof job.matching_score === 'number' && (
+                <div className="ai-mini-match">
+                  <Sparkles size={14} />
+                  <span>{Math.round(job.matching_score)}% {t.aiMatchLabel || "de compatibilité"}</span>
+                </div>
+              )}
               <div className="card-foot">
-                <span className="badge-type">{job.contract_type || job.type || "Non spécifié"}</span>
-                <span className="rating"><Star size={12} fill="currentColor" /> {job.rating || "5.0"}</span>
+                <span className="badge-type">{job.contract_type || "Non spécifié"}</span>
               </div>
             </div>
           ))}
@@ -228,11 +223,11 @@ const Research: React.FC<ResearchProps> = ({
             <div className="details-header">
               <div className="d-company-row">
                 <div className="d-logo">
-                  {selectedJob.logo ? <span>{selectedJob.logo}</span> : <Building2 size={24} />}
+                  <span>{initials(selectedJob.entreprise_nom)}</span>
                 </div>
                 <div className="d-title">
-                  <h2>{selectedJob.titre || selectedJob.title}</h2>
-                  <p><Building2 size={16} /> {selectedJob.entreprise_nom || selectedJob.company}</p>
+                  <h2>{selectedJob.titre}</h2>
+                  <p><Building2 size={16} /> {selectedJob.entreprise_nom}</p>
                 </div>
                 <div className="d-actions">
                   <button className="btn-circle"><Share2 size={18} /></button>
@@ -246,40 +241,47 @@ const Research: React.FC<ResearchProps> = ({
             <div className="details-content">
               <div className="ai-summary-box">
                 <div className="ai-title"><Sparkles size={16} /> {t.aiAnalysisTitle || "Recommandation IA"}</div>
-                {selectedJob.aiSummary && <p>{selectedJob.aiSummary}</p>}
-                {!selectedJob.aiSummary && <p>Cette offre provient de {selectedJob.source || "WeLoveDevs"}.</p>}
+                <p>Cette offre provient de {selectedJob.source || "WeLoveDevs"}.</p>
 
-                <div className="ai-match-container">
-                  <div className="ai-match-header">
-                    <span><Sparkles size={16} />{t.skillsMatch || "Correspondance des compétences"}</span>
-                    <span>{Math.round(selectedJob.matching_score || 85)}%</span>
+                {typeof selectedJob.matching_score === 'number' ? (
+                  <div className="ai-match-container">
+                    <div className="ai-match-header">
+                      <span><Sparkles size={16} />{t.skillsMatch || "Correspondance des compétences"}</span>
+                      <span>{Math.round(selectedJob.matching_score)}%</span>
+                    </div>
+                    <div className="ai-match-bar-bg">
+                      <div className="ai-match-bar-fill" style={{ width: `${Math.round(selectedJob.matching_score)}%` }} />
+                    </div>
                   </div>
-                  <div className="ai-match-bar-bg">
-                    <div className="ai-match-bar-fill" style={{ width: `${Math.round(selectedJob.matching_score || 85)}%` }} />
-                  </div>
-                </div>
+                ) : (
+                  <p>
+                    {!userData?.email
+                      ? "Connectez-vous et renseignez vos compétences dans votre profil pour voir votre compatibilité avec cette offre."
+                      : !userData.competences
+                        ? "Ajoutez vos compétences dans votre profil pour voir votre compatibilité avec cette offre."
+                        : "Le score de compatibilité n'est pas disponible pour le moment."}
+                  </p>
+                )}
               </div>
 
               <div className="info-grid">
                 <div className="info-item"><MapPin size={16}/> <span>{selectedJob.location}</span></div>
-                <div className="info-item"><DollarSign size={16}/><span>{selectedJob.salaire_min > 0 ? `${selectedJob.salaire_min}k€ - ${selectedJob.salaire_max}k€` : (selectedJob.salary || "Non communiqué")}</span></div>
-                <div className="info-item"><Clock size={16}/> <span>{selectedJob.experience || `Posté le ${selectedJob.date || "Récemment"}`}</span></div>
-                {selectedJob.teamSize && (<div className="info-item"><Users size={16}/> <span>{selectedJob.teamSize} {t.teamSizeUnit || "pers."}</span></div>)}
+                <div className="info-item"><DollarSign size={16}/><span>{formatSalary(selectedJob.salaire_min, selectedJob.salaire_max)}</span></div>
+                <div className="info-item"><Clock size={16}/> <span>Publiée le {formatDate(selectedJob.date)}</span></div>
               </div>
 
               <div className="desc-section">
                 <h3>{t.descriptionLabel || "Description"}</h3>
-                {selectedJob.description ? (<div dangerouslySetInnerHTML={{ __html: selectedJob.description }} />) : (<p>Aucune description disponible pour ce poste.</p>)}
+                {selectedJob.description ? (<p style={{ whiteSpace: 'pre-line' }}>{selectedJob.description}</p>) : (<p>Aucune description disponible pour ce poste.</p>)}
               </div>
 
-              {(selectedJob.competences || selectedJob.requirements) && (
+              {selectedJob.competences && (
                 <div className="skills-section">
                   <h3>{t.languagesLabel || "Compétences"}</h3>
                   <div className="skills-wrap">
-                    {selectedJob.competences && typeof selectedJob.competences === 'string'
-                      ? selectedJob.competences.split(',').map((c: string) => (<span key={c} className="skill-tag">{c.trim()}</span>))
-                      : selectedJob.requirements?.map((r: string) => (<span key={r} className="skill-tag">{r}</span>))
-                    }
+                    {selectedJob.competences.split(',').map(c => c.trim()).filter(Boolean).map(c => (
+                      <span key={c} className="skill-tag">{c}</span>
+                    ))}
                   </div>
                 </div>
               )}
@@ -302,8 +304,8 @@ const Research: React.FC<ResearchProps> = ({
                   </div>
 
                   <div className="modal-job-summary">
-                    <strong>{selectedJob.titre || selectedJob.title}</strong>
-                    <span>chez {selectedJob.entreprise_nom || selectedJob.company}</span>
+                    <strong>{selectedJob.titre}</strong>
+                    <span>chez {selectedJob.entreprise_nom}</span>
                   </div>
 
                   <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -312,7 +314,7 @@ const Research: React.FC<ResearchProps> = ({
                         <label style={{ fontSize: '0.9rem', fontWeight: 500, color: 'var(--text-dark)' }}>Curriculum Vitae (CV) *</label>
                         <input 
                           type="file" 
-                          accept="*" 
+                          accept={CV_FORMATS}
                           onChange={(e) => setCvFile(e.target.files ? e.target.files[0] : null)}
                           style={{ fontSize: '0.85rem', padding: '6px', border: '1px solid var(--border-color)', borderRadius: '6px', background: 'var(--bg-light)', color: 'var(--text-dark)' }}
                         />
@@ -321,7 +323,7 @@ const Research: React.FC<ResearchProps> = ({
                         <label style={{ fontSize: '0.9rem', fontWeight: 500, color: 'var(--text-dark)' }}>Lettre de motivation</label>
                         <input 
                           type="file" 
-                          accept="*" 
+                          accept={CV_FORMATS}
                           onChange={(e) => setMotivationFile(e.target.files ? e.target.files[0] : null)}
                           style={{ fontSize: '0.85rem', padding: '6px', border: '1px solid var(--border-color)', borderRadius: '6px', background: 'var(--bg-light)', color: 'var(--text-dark)' }}
                         />

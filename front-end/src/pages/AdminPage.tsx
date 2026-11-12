@@ -1,37 +1,33 @@
 import { useState, useEffect } from 'react';
 import { Users, Radio, Briefcase, Trash2, Shield, ArrowLeft } from 'lucide-react';
 import './AdminPage.css';
+import { apiFetch, errorMessage } from '../lib/api';
+import type { AdminJob, AdminUser, NavigateFn, Translation, UserData } from '../lib/types';
 
 interface AdminPageProps {
-  onNavigate: (page: any) => void;
-  t: any;
-  userData: any;
+  onNavigate: NavigateFn;
+  t: Translation;
+  userData: UserData;
 }
 
 export default function AdminPage({ onNavigate, t, userData }: AdminPageProps) {
-  const [users, setUsers] = useState<any[]>([]);
-  const [offers, setOffers] = useState<any[]>([]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [offers, setOffers] = useState<AdminJob[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchAdminData = async () => {
       try {
-        const token = localStorage.getItem('token');
-        const headers = {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        };
-
         const [usersRes, jobsRes] = await Promise.all([
-          fetch('/api/admin/users', { headers }),
-          fetch('/api/admin/jobs', { headers })
+          apiFetch('/api/admin/users'),
+          apiFetch('/api/admin/jobs')
         ]);
 
         if (usersRes.ok && jobsRes.ok) {
           const usersData = await usersRes.json();
           const jobsData = await jobsRes.json();
 
-          const usersWithStatus = usersData.map((user: any) => ({
+          const usersWithStatus = usersData.map((user: AdminUser) => ({
             ...user,
             status: user.email === userData?.email ? 'online' : 'offline'
           }));
@@ -54,16 +50,12 @@ export default function AdminPage({ onNavigate, t, userData }: AdminPageProps) {
   const handleDeleteUser = async (id: number) => {
     if (window.confirm("Supprimer cet utilisateur définitivement ?")) {
       try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(`/api/admin/users/${id}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const response = await apiFetch(`/api/admin/users/${id}`, { method: 'DELETE' });
 
         if (response.ok) {
           setUsers(users.filter(user => user.id !== id));
         } else {
-          alert("Erreur lors de la suppression de l'utilisateur.");
+          alert(await errorMessage(response, "Erreur lors de la suppression de l'utilisateur."));
         }
       } catch (error) {
         console.error("Erreur suppression utilisateur :", error);
@@ -74,16 +66,12 @@ export default function AdminPage({ onNavigate, t, userData }: AdminPageProps) {
   const handleDeleteOffer = async (id: number) => {
     if (window.confirm("Supprimer cette offre d'emploi définitivement ?")) {
       try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(`/api/admin/jobs/${id}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const response = await apiFetch(`/api/admin/jobs/${id}`, { method: 'DELETE' });
 
         if (response.ok) {
           setOffers(offers.filter(offer => offer.id !== id));
         } else {
-          alert("Erreur lors de la suppression de l'offre.");
+          alert(await errorMessage(response, "Erreur lors de la suppression de l'offre."));
         }
       } catch (error) {
         console.error("Erreur suppression offre :", error);

@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './Home.css';
-import { Search, MapPin, Briefcase, Settings, Moon, Sun, LayoutDashboard, ShieldCheck, HelpCircle, Languages, X, Sparkles, Heart } from 'lucide-react';
+import { Search, MapPin, Settings, Moon, Sun, LayoutDashboard, ShieldCheck, HelpCircle, Languages, X, Sparkles, Heart } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import type { NavigateFn, Translation } from '../lib/types';
 
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
-let DefaultIcon = L.icon({
+const DefaultIcon = L.icon({
   iconUrl: markerIcon,
   shadowUrl: markerShadow,
   iconSize: [25, 41],
@@ -37,11 +38,11 @@ interface HomeProps {
   onLoginClick: () => void;
   onRegisterClick: () => void;
   onDashboardClick: () => void;
-  onNavigate: (page: any) => void;
+  onNavigate: NavigateFn;
   isLoggedIn: boolean;
   theme: string;
   setTheme: (t: string) => void;
-  t: any;
+  t: Translation;
   currentLang: string;
   setLang: (lang: string) => void;
   userData?: { nom?: string; prenom?: string };
@@ -133,9 +134,8 @@ const HomePage: React.FC<HomeProps> = ({
   // Déclenche la popup dès qu'on est connecté ET que le prénom est chargé (pas "vous")
   useEffect(() => {
     if (!isLoggedIn) {
-      // Reset quand on se déconnecte
+      // Reset quand on se déconnecte (la popup est masquée au rendu, cf. welcomeVisible)
       welcomeShownRef.current = false;
-      setShowWelcome(false);
       return;
     }
 
@@ -148,8 +148,13 @@ const HomePage: React.FC<HomeProps> = ({
     welcomeShownRef.current = true;
     setShowWelcome(true);
     const timer = setTimeout(() => setShowWelcome(false), 5000);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      setShowWelcome(false);
+    };
   }, [isLoggedIn, prenom]);
+
+  const welcomeVisible = isLoggedIn && showWelcome;
 
   useEffect(() => {
     const loadOffersOnMap = async () => {
@@ -345,7 +350,7 @@ const HomePage: React.FC<HomeProps> = ({
         </div>
       </header>
 
-      {showWelcome && (
+      {welcomeVisible && (
         <div className="home-welcome-backdrop" onClick={() => setShowWelcome(false)}>
           <div className="home-welcome-card" onClick={(e) => e.stopPropagation()}>
             <button className="home-welcome-close" onClick={() => setShowWelcome(false)}>

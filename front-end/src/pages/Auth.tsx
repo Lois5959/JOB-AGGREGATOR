@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
 import './Auth.css';
 import { Mail, Lock, User, Rocket, ArrowRight, ArrowLeft, Moon, Sun, Briefcase, CheckCircle, Search } from 'lucide-react';
+import { errorMessage, setToken } from '../lib/api';
+import type { Translation } from '../lib/types';
 
 interface AuthProps {
   onLoginSuccess: (email: string, isRegister?: boolean, fallbackName?: string) => void;
   theme: string;
   setTheme: (t: string) => void;
   initialStep?: 'login' | 'register';
-  t?: any;
+  t?: Translation;
 }
 
 // Une grande liste de compétences (vous pouvez en ajouter autant que vous voulez ici)
@@ -65,13 +67,12 @@ const Auth: React.FC<AuthProps> = ({ onLoginSuccess, theme, setTheme, initialSte
 
       if (response.ok) {
         const data = await response.json();
-        localStorage.setItem('token', data.access_token);
+        setToken(data.access_token);
         onLoginSuccess(email, false);
       } else {
-        const errorData = await response.json();
-        alert(errorData.detail || "Erreur d'identifiants");
+        alert(await errorMessage(response, "Erreur d'identifiants"));
       }
-    } catch (error) {
+    } catch {
       alert("Impossible de contacter le serveur.");
     }
   };
@@ -101,22 +102,21 @@ const Auth: React.FC<AuthProps> = ({ onLoginSuccess, theme, setTheme, initialSte
 
           if (loginResponse.ok) {
             const loginData = await loginResponse.json();
-            localStorage.setItem('token', loginData.access_token);
+            setToken(loginData.access_token);
             onLoginSuccess(email, true, fullName); // Ajout du fullName pour éviter le bug "Utilisateur"
           } else {
             alert("Compte créé avec succès ! Connectez-vous.");
             setStep('login');
           }
-        } catch (loginError) {
+        } catch {
           setStep('login');
         }
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        alert(errorData.detail || "Erreur lors de l'inscription");
+        alert(await errorMessage(response, "Erreur lors de l'inscription"));
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error("Erreur serveur", error);
-      alert(error.message || "Impossible de se connecter au serveur pour l'inscription.");
+      alert("Impossible de se connecter au serveur pour l'inscription.");
     }
   };
 
@@ -199,6 +199,10 @@ const Auth: React.FC<AuthProps> = ({ onLoginSuccess, theme, setTheme, initialSte
             <button className="btn-primary" onClick={() => {
               if (!fullName || !email || !password) {
                 alert("Veuillez remplir tous les champs avant de continuer.");
+                return;
+              }
+              if (password.length < 8) {
+                alert("Le mot de passe doit contenir au moins 8 caractères.");
                 return;
               }
               setStep('onboarding');
