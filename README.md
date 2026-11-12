@@ -214,14 +214,23 @@ npm run dev        # http://localhost:5173
 
 ---
 
-## Contexte et équipe
+## Contexte et rôle
 
 Projet réalisé en équipe en 2ᵉ année du Bachelor Epitech (module B-YEP-200, Lille).
 
-- **Loïs-Elie Ekollo** — _à compléter : ta partie du projet_
-- _Coéquipiers à créditer_
+**Mon rôle : la partie DevOps** — Dockerfiles, orchestration Docker Compose, protection
+anti-force brute avec fail2ban et pipeline d'intégration continue GitHub Actions.
 
-**Après le rendu**, j'ai repris le projet pour le rendre déployable et sûr : contrôle d'accès sur
-toutes les routes, limite de tentatives de connexion et fail2ban fonctionnel, healthchecks et
-réseau interne dans Docker Compose, offres de démo pour un démarrage sans clé d'API,
-suppression du HTML des descriptions, 74 tests automatisés et une CI en quatre jobs.
+**Après le rendu**, j'ai repris le projet pour le rendre déployable et sûr : healthchecks et
+réseau interne dans Docker Compose, image non-root, fail2ban branché sur de vrais journaux,
+CI en quatre jobs (dont un démarrage complet de la stack), contrôle d'accès sur toutes les routes,
+limite de tentatives de connexion, offres de démo pour un démarrage sans clé d'API et 74 tests
+automatisés.
+
+### Prochaines étapes DevOps
+
+- [ ] HTTPS avec un reverse proxy (Caddy ou Traefik) et Let's Encrypt
+- [ ] Publication des images sur GitHub Container Registry depuis la CI
+- [ ] Scan de vulnérabilités des images (Trivy) dans la CI
+- [ ] Déploiement automatique sur un serveur cloud
+- [ ] Supervision : métriques Prometheus et tableaux de bord Grafana
