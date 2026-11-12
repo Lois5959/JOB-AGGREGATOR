@@ -31,7 +31,7 @@
 
 **Besoins identifiés :**
 
-| Besoin | Priorité | Solution Jobify |
+| Besoin | Priorité | Solution JobyFind |
 |---|---|---|
 | Trouver des offres de stage tech centralisées | Haute | Agrégation WeLoveDevs + recherche unifiée |
 | Savoir si ses compétences sont demandées | Haute | Feature AI de matching par stack |
@@ -45,11 +45,11 @@
 
 ## 3. Proposition de Valeur
 
-> **Jobify est la plateforme d'emploi tech pensée pour les étudiants et développeurs juniors : offres centralisées, vision du marché, et recommandations intelligentes basées sur votre stack technique.**
+> **JobyFind est la plateforme d'emploi tech pensée pour les étudiants et développeurs juniors : offres centralisées, vision du marché, et recommandations intelligentes basées sur votre stack technique.**
 
 ### Différenciation vs concurrents
 
-| Critère | LinkedIn | WTTJ | WeLoveDevs | **Jobify** |
+| Critère | LinkedIn | WTTJ | WeLoveDevs | **JobyFind** |
 |---|---|---|---|---|
 | Focus développeurs | Partiel | Oui | Oui | **Oui** |
 | Données réelles marché | Non | Non | Non | **Oui (analytics)** |

@@ -1,351 +1,277 @@
-# Documentation API Backend — Jobify
+# Documentation de l'API — JobyFind
 
-**Base URL :** `http://localhost:8000`
-**Framework :** FastAPI + Uvicorn
-**Format :** JSON (Content-Type: application/json)
-**Documentation interactive :** `http://localhost:8000/docs` (Swagger UI généré automatiquement)
+- **En local (Docker)** : l'API est servie derrière Nginx sur `http://localhost:8082/api/…`
+  et directement sur `http://127.0.0.1:8000` (machine locale uniquement).
+- **Documentation interactive** : `http://127.0.0.1:8000/docs` (Swagger généré par FastAPI).
+- **Format** : JSON, sauf `POST /api/applications` (`multipart/form-data`).
 
 ---
 
 ## Authentification
 
-Les routes protégées utilisent un token JWT Bearer transmis dans le header :
+Les routes protégées attendent un jeton JWT dans l'en-tête :
 
 ```
 Authorization: Bearer <access_token>
 ```
 
-Le token est obtenu via `POST /api/login` et expire après **30 minutes**.
+Le jeton est obtenu avec `POST /api/login`. Il est signé en HS256 avec `JWT_SECRET`
+et expire après `JWT_EXPIRE_MINUTES` (30 min par défaut).
+
+### Niveaux d'accès
+
+| Niveau | Règle |
+|---|---|
+| **Public** | Aucun jeton. |
+| **Propriétaire** | Jeton valide **et** l'email de l'URL (ou du formulaire) est celui du jeton. Un admin passe aussi. |
+| **Admin** | Jeton valide **et** `role_id = 2` relu **en base** à chaque appel : modifier le rôle dans le jeton ne sert à rien. |
+
+| Code | Quand |
+|---|---|
+| `401` | Jeton absent, invalide ou expiré (en-tête `WWW-Authenticate: Bearer`). |
+| `403` | Jeton valide mais ressource d'un autre utilisateur, ou route admin sans être admin. |
 
 ---
 
-## Routes d'authentification
+## Vue d'ensemble des routes
+
+| Méthode | Route | Accès |
+|---|---|---|
+| `GET` | `/api/health` | Public |
+| `POST` | `/api/register` | Public |
+| `POST` | `/api/login` | Public (limité : 5 échecs / 10 min / IP) |
+| `GET` | `/api/dashboard/stats` | Public |
+| `GET` | `/api/dashboard/jobs` | Public |
+| `GET` / `PUT` | `/api/dashboard/user/{email}` | Propriétaire |
+| `GET` | `/api/dashboard/stats/monthly?email=` | Propriétaire |
+| `GET` | `/api/recommendations/{email}` | Propriétaire |
+| `POST` | `/api/applications` | Propriétaire |
+| `GET` | `/api/applications/{email}` | Propriétaire |
+| `POST` | `/api/fetch` | Admin |
+| `GET` | `/api/admin/users` | Admin |
+| `DELETE` | `/api/admin/users/{user_id}` | Admin |
+| `GET` | `/api/admin/jobs` | Admin |
+| `DELETE` | `/api/admin/jobs/{job_id}` | Admin |
+
+---
+
+## Santé
+
+### `GET /api/health`
+
+Vérifie que l'API répond **et** que la base est joignable. Utilisée par le `HEALTHCHECK` Docker.
+
+| Code | Corps |
+|---|---|
+| `200` | `{"status": "ok", "database": "up"}` |
+| `503` | `{"status": "degraded", "database": "down"}` |
+
+---
+
+## Authentification
 
 ### `POST /api/register`
 
-Crée un nouveau compte utilisateur.
-
-**Corps de la requête :**
-
 ```json
 {
-  "email": "user@example.com",
-  "password": "motdepasse123",
-  "nom": "Sacha Bouron",
-  "competences": "React, TypeScript, Node.js"
+  "email": "camille@example.com",
+  "password": "motdepasse-solide",
+  "nom": "Camille Martin",
+  "competences": "Docker, Linux, Python"
 }
 ```
 
-| Champ | Type | Requis | Description |
-|---|---|---|---|
-| `email` | EmailStr | ✓ | Email valide (validé par Pydantic) |
-| `password` | string | ✓ | Mot de passe en clair (haché côté serveur) |
-| `nom` | string | — | Nom affiché (défaut : "Utilisateur") |
-| `competences` | string | — | Stack technique libre |
-
-**Réponses :**
+| Champ | Requis | Règle |
+|---|---|---|
+| `email` | ✓ | Email valide |
+| `password` | ✓ | 8 à 128 caractères (haché en bcrypt) |
+| `nom`, `prenom` | — | 120 caractères max |
+| `competences` | — | Texte libre, séparé par des virgules |
 
 | Code | Cas |
 |---|---|
-| `201 Created` | Compte créé avec succès |
-| `400 Bad Request` | Email déjà utilisé |
-| `422 Unprocessable Entity` | Email invalide ou champ requis manquant |
-| `500 Internal Server Error` | Erreur base de données |
+| `201` | Compte créé (rôle utilisateur) |
+| `400` | Email déjà utilisé |
+| `422` | Email invalide, mot de passe trop court… |
 
----
+> On ne peut pas s'inscrire en admin : le premier admin est créé au démarrage
+> à partir de `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
 ### `POST /api/login`
 
-Authentifie un utilisateur et retourne un token JWT.
-
-**Corps de la requête :**
-
 ```json
-{
-  "email": "user@example.com",
-  "password": "motdepasse123"
-}
+{ "email": "camille@example.com", "password": "motdepasse-solide" }
 ```
 
-**Réponse 200 :**
+Réponse `200` :
 
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "access_token": "eyJhbGciOiJIUzI1NiIs…",
   "token_type": "bearer",
-  "email": "user@example.com",
-  "nom": "Sacha Bouron"
-}
-```
-
-| Code | Cas |
-|---|---|
-| `200 OK` | Authentification réussie |
-| `401 Unauthorized` | Email ou mot de passe incorrect |
-
----
-
-## Routes Dashboard
-
-### `GET /api/dashboard/stats`
-
-Retourne les compteurs globaux pour l'en-tête du dashboard.
-
-**Réponse 200 :**
-
-```json
-{
-  "total": 150,
-  "cdi_count": 42
-}
-```
-
----
-
-### `GET /api/dashboard/jobs`
-
-Retourne la liste des offres avec filtres optionnels.
-
-**Paramètres de requête :**
-
-| Paramètre | Type | Description |
-|---|---|---|
-| `location` | string (optionnel) | Filtre par ville (LIKE %location%) |
-| `contract` | string (optionnel) | Filtre par type de contrat (LIKE %contract%) |
-
-**Exemple :** `GET /api/dashboard/jobs?location=Paris&contract=CDI`
-
-**Réponse 200 :**
-
-```json
-[
-  {
-    "id": 1,
-    "titre": "Senior Frontend Developer",
-    "entreprise_nom": "TechVision",
-    "description": "...",
-    "salaire_min": 55000,
-    "salaire_max": 70000,
-    "location": "Paris",
-    "date": "2024-05-12",
-    "contract_type": "CDI",
-    "competences": "React, TypeScript",
-    "url": "https://welovedevs.com/..."
-  }
-]
-```
-
----
-
-### `GET /api/dashboard/user/{email}`
-
-Retourne les informations de profil d'un utilisateur.
-
-**Paramètre de chemin :** `email` — adresse email de l'utilisateur
-
-**Réponse 200 :**
-
-```json
-{
-  "email": "user@example.com",
-  "nom": "Sacha Bouron",
-  "competences": "React, TypeScript, Node.js",
+  "email": "camille@example.com",
+  "nom": "Camille Martin",
+  "prenom": "Camille",
   "role_id": 1
 }
 ```
 
-**Réponse si non trouvé :**
+| Code | Cas |
+|---|---|
+| `200` | Connexion réussie (le compteur d'échecs de l'IP est remis à zéro) |
+| `401` | Email ou mot de passe incorrect (ligne écrite dans le journal lu par fail2ban) |
+| `429` | Trop d'échecs depuis cette IP ; en-tête `Retry-After` en secondes |
+
+---
+
+## Offres (public)
+
+### `GET /api/dashboard/stats`
 
 ```json
-{ "error": "Utilisateur non trouvé" }
+{ "total": 150, "cdi_count": 42 }
+```
+
+### `GET /api/dashboard/jobs`
+
+| Paramètre | Description |
+|---|---|
+| `location` | Filtre « contient » sur la ville |
+| `contract` | Filtre « contient » sur le type de contrat |
+
+Renvoie au plus 1 000 offres, les plus récentes d'abord :
+
+```json
+[
+  {
+    "id": 12,
+    "titre": "Ingénieur DevOps",
+    "entreprise_nom": "Nordwave",
+    "description": "Texte brut, sans HTML",
+    "salaire_min": 40000,
+    "salaire_max": 48000,
+    "location": "Lille",
+    "date": "2026-10-28",
+    "contract_type": "CDI",
+    "competences": "Docker, Kubernetes, Linux",
+    "url": null,
+    "source": "WeLoveDevs"
+  }
+]
 ```
 
 ---
+
+## Profil (propriétaire)
+
+### `GET /api/dashboard/user/{email}`
+
+```json
+{
+  "email": "camille@example.com",
+  "nom": "Camille Martin",
+  "prenom": "Camille",
+  "competences": "Docker, Linux, Python",
+  "role_id": 1
+}
+```
+
+`404` si l'utilisateur n'existe pas.
 
 ### `PUT /api/dashboard/user/{email}`
 
-Met à jour le profil d'un utilisateur (nom et compétences).
-
-**Corps de la requête :**
-
 ```json
-{
-  "nom": "Sacha Bouron",
-  "competences": "React, TypeScript, Python"
-}
+{ "nom": "Camille Martin", "competences": "Docker, Linux, Python, Terraform" }
 ```
 
-| Code | Cas |
-|---|---|
-| `200 OK` | Profil mis à jour |
-| `500 Internal Server Error` | Erreur base de données |
+Un champ absent n'est pas modifié. Le rôle ne peut **pas** être changé par cette route.
+
+### `GET /api/dashboard/stats/monthly?email=…`
+
+Candidatures des 6 derniers mois (le passage d'une année à l'autre est géré) :
+
+```json
+[
+  { "mois": "Juin", "envoyees": 0, "acceptees": 0, "refusees": 0 },
+  { "mois": "Nov.", "envoyees": 3, "acceptees": 1, "refusees": 0 }
+]
+```
 
 ---
 
-## Routes IA / Recommandations
+## Recommandations (propriétaire)
 
 ### `GET /api/recommendations/{email}`
 
-Retourne toutes les offres triées par score de matching avec le profil de l'utilisateur.
+Classe les offres selon la proximité entre les compétences du profil et le texte de l'offre
+(titre, description, compétences), avec le modèle `paraphrase-multilingual-MiniLM-L12-v2`
+(modifiable avec `EMBEDDING_MODEL`).
 
-Le scoring utilise la similarité cosinus entre l'embedding des compétences de l'utilisateur et l'embedding `titre + entreprise + description` de chaque offre (modèle `all-MiniLM-L6-v2`).
-
-**Paramètre de chemin :** `email` — adresse email de l'utilisateur
-
-**Réponse 200 :**
-
-```json
-[
-  {
-    "id": 1,
-    "titre": "Senior Frontend Developer",
-    "entreprise_nom": "TechVision",
-    "matching_score": 87.43,
-    ...
-  },
-  {
-    "id": 5,
-    "titre": "Data Scientist",
-    "matching_score": 12.11,
-    ...
-  }
-]
-```
-
-**Réponse si profil vide :**
-
-```json
-{ "error": "Compétences non renseignées ou utilisateur introuvable" }
-```
+- Chaque offre reçoit un `matching_score` entre 0 et 100, triées du plus pertinent au moins pertinent.
+- Les vecteurs des offres sont gardés en cache : une offre n'est encodée qu'une fois.
+- **Repli** : si le profil n'a pas de compétences, ou si le modèle n'est pas disponible, la route
+  renvoie la liste normale des offres **sans** `matching_score` (le front affiche alors un message).
 
 ---
 
-## Routes Candidatures
+## Candidatures (propriétaire)
 
-### `POST /api/applications`
+### `POST /api/applications` — `multipart/form-data`
 
-Enregistre une nouvelle candidature.
-
-**Corps de la requête :**
-
-```json
-{
-  "user_email": "user@example.com",
-  "job_id": 42,
-  "company": "TechVision",
-  "position": "Senior Frontend Developer"
-}
-```
+| Champ | Requis | Règle |
+|---|---|---|
+| `user_email` | ✓ | Doit être l'email du jeton (sauf admin) |
+| `job_id` | ✓ | Entier |
+| `company`, `position` | ✓ | 255 caractères max |
+| `cv` | ✓ | `.pdf`, `.doc`, `.docx` ou `.odt`, 5 Mo max |
+| `motivation_letter` | — | Mêmes règles que le CV |
+| `message` | — | Texte libre |
 
 | Code | Cas |
 |---|---|
-| `200 OK` | Candidature enregistrée |
-| `500 Internal Server Error` | Erreur base de données |
+| `201` | Candidature enregistrée (statut « En attente ») |
+| `400` | Format de fichier refusé |
+| `413` | Fichier trop lourd |
 
----
+> Les fichiers sont contrôlés mais pas stockés : seule la candidature est enregistrée en base.
 
 ### `GET /api/applications/{email}`
 
-Retourne toutes les candidatures d'un utilisateur, triées par ID décroissant.
-
-**Réponse 200 :**
-
-```json
-[
-  {
-    "id": 3,
-    "user_email": "user@example.com",
-    "job_id": 42,
-    "company": "TechVision",
-    "position": "Senior Frontend Developer",
-    "date": "2024-05-12",
-    "status": "En attente",
-    "color": "orange"
-  }
-]
-```
+Liste des candidatures de l'utilisateur, la plus récente d'abord
+(`id`, `user_email`, `job_id`, `company`, `position`, `date`, `status`, `color`).
 
 ---
 
-## Routes Administration (rôle admin requis)
-
-### `GET /api/admin/users`
-
-Retourne tous les utilisateurs avec leur rôle.
-
-**Réponse 200 :**
-
-```json
-[
-  {
-    "id": 1,
-    "name": "Sacha Bouron",
-    "email": "sacha.bouron@icloud.com",
-    "role": "admin"
-  }
-]
-```
-
----
-
-### `DELETE /api/admin/users/{user_id}`
-
-Supprime définitivement un utilisateur.
-
-| Code | Cas |
-|---|---|
-| `200 OK` | Utilisateur supprimé |
-| `500 Internal Server Error` | Échec de la suppression |
-
----
-
-### `GET /api/admin/jobs`
-
-Retourne toutes les offres au format tableau d'administration.
-
-**Réponse 200 :**
-
-```json
-[
-  {
-    "id": 1,
-    "title": "Développeur Fullstack",
-    "company": "TechCorp",
-    "city": "Paris"
-  }
-]
-```
-
----
-
-### `DELETE /api/admin/jobs/{job_id}`
-
-Supprime définitivement une offre d'emploi.
-
-| Code | Cas |
-|---|---|
-| `200 OK` | Offre supprimée |
-| `500 Internal Server Error` | Échec de la suppression |
-
----
-
-## Route de collecte manuelle
+## Administration (admin)
 
 ### `POST /api/fetch`
 
-Déclenche manuellement une collecte depuis l'API WeLoveDevs (20 pages × 50 offres max).
+Lance une collecte WeLoveDevs immédiate. `400` si `WELOVEDEVS_API_KEY` n'est pas renseignée.
+Sans action manuelle, la collecte tourne toute seule toutes les `COLLECT_INTERVAL_MINUTES`.
 
-**Réponse 200 :**
-
-```json
-{ "message": "1000 offres collectées" }
-```
-
-ou si aucune donnée :
+### `GET /api/admin/users`
 
 ```json
-{ "message": "Aucune nouvelle offre trouvée." }
+[{ "id": 1, "name": "Administrateur", "email": "admin@example.com", "role": "admin" }]
 ```
+
+### `DELETE /api/admin/users/{user_id}`
+
+| Code | Cas |
+|---|---|
+| `200` | Utilisateur supprimé |
+| `400` | Tentative de supprimer son propre compte |
+| `404` | Utilisateur introuvable |
+
+### `GET /api/admin/jobs`
+
+```json
+[{ "id": 12, "title": "Ingénieur DevOps", "company": "Nordwave", "city": "Lille" }]
+```
+
+### `DELETE /api/admin/jobs/{job_id}`
+
+`200` si l'offre est supprimée, `404` si elle n'existe pas.
 
 ---
 
@@ -353,9 +279,12 @@ ou si aucune donnée :
 
 | Code | Signification |
 |---|---|
-| `200 OK` | Succès |
-| `201 Created` | Ressource créée |
-| `400 Bad Request` | Données invalides ou conflit (ex: email existant) |
-| `401 Unauthorized` | Credentials incorrects |
-| `422 Unprocessable Entity` | Validation Pydantic échouée |
-| `500 Internal Server Error` | Erreur serveur ou base de données |
+| `200` / `201` | Succès / ressource créée |
+| `400` | Requête refusée (email déjà pris, fichier invalide, auto-suppression…) |
+| `401` | Non authentifié ou identifiants incorrects |
+| `403` | Authentifié mais pas autorisé |
+| `404` | Ressource introuvable |
+| `413` | Fichier trop lourd |
+| `422` | Validation Pydantic échouée |
+| `429` | Trop de tentatives de connexion |
+| `500` / `503` | Erreur serveur / base indisponible |

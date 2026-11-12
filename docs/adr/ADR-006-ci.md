@@ -3,7 +3,7 @@
 | Champ | Valeur |
 |---|---|
 | **Statut** | Accepté |
-| **Date** | Mai 2026 |
+| **Date** | Mai 2026 (mis à jour en novembre 2026) |
 | **Décideurs** | Équipe Job Aggregator |
 
 ---
@@ -16,68 +16,70 @@ Le cahier des charges impose GitHub Actions comme système CI, avec exécution a
 
 ## Décision
 
-Mettre en place un pipeline GitHub Actions en deux jobs distincts : **build** et **test**, déclenchés sur `push` (main) et `pull_request`.
+Un seul workflow, `.github/workflows/ci.yml`, déclenché sur chaque `push` vers `main` / `develop`
+et sur chaque pull request vers `main`. Il contient **quatre jobs** : les trois premiers tournent
+en parallèle, le dernier ne démarre que si le backend et le frontend sont verts.
+
+```
+backend ──────┐
+integration   ├──► docker
+frontend ─────┘
+```
 
 ---
 
 ## Ce qui est automatisé
 
-### Job 1 — Build Docker
-
-Vérifie que les images Docker se construisent sans erreur à partir des `Dockerfile` existants.
+### Job 1 — `backend` : lint + tests unitaires
 
 ```yaml
-- name: Build frontend image
-  run: docker build ./front-end
-
-- name: Build backend image
-  run: docker build ./backend
+- run: flake8 .                                   # config dans backend/.flake8
+- run: pytest --cov=. --cov-report=term-missing   # tests + couverture
 ```
 
-**Pourquoi ce check ?**
-Un `Dockerfile` cassé (dépendance introuvable, instruction invalide) serait détecté immédiatement, avant que n'importe quel développeur tente de lancer le projet localement ou en production.
+Les tests unitaires remplacent la base par une fausse base en mémoire (`tests/conftest.py`) :
+ils sont rapides et ne dépendent d'aucun service.
 
----
+**Routes testées (exigence : 2 minimum)** — en pratique toutes les routes sensibles :
 
-### Job 2 — Tests backend (pytest)
+| Route | Ce qui est vérifié |
+|---|---|
+| `POST /api/register` | 201, email déjà pris → 400, email invalide / mot de passe trop court → 422 |
+| `POST /api/login` | 200 + jeton, mauvais mot de passe → 401, 6ᵉ échec → 429, ligne fail2ban écrite |
+| Routes admin | sans jeton → 401, utilisateur → 403, rôle falsifié dans le jeton → 403 |
+| Routes « propriétaire » | accès au profil / aux candidatures d'un autre utilisateur → 403 |
+| `GET /api/recommendations/{email}` | classement correct (faux modèle), cache, repli quand le profil n'a pas de compétences |
 
-Lance les tests unitaires et d'intégration du backend dans un environnement Python isolé.
+**Fonctions de normalisation testées (exigence : 1 minimum)** — `collector.py` :
+`normalize()`, `parse_publish_date()` (secondes, millisecondes, microsecondes, ISO),
+`extract_location()`, `texte_brut()` (suppression du HTML et des scripts).
 
-**Routes testées (exigence : 2 minimum) :**
+### Job 2 — `integration` : tests sur un vrai MySQL 8
 
-| Route | Méthode | Test |
-|---|---|---|
-| `/api/register` | POST | Inscription valide → 201, email déjà utilisé → 400 |
-| `/api/login` | POST | Credentials valides → 200 + token, mauvais mdp → 401 |
+Un conteneur `mysql:8.0` est lancé comme *service* GitHub Actions. Les tests marqués
+`@pytest.mark.integration` recréent le schéma depuis `db/init.sql` puis vérifient les vraies
+requêtes SQL (insertion sans doublon, filtres, statistiques mensuelles, suppression…).
 
-**Fonction de normalisation testée (exigence : 1 minimum) :**
-
-| Fonction | Fichier | Test |
-|---|---|---|
-| `normalize()` | `api.py` | Offre complète → dict normalisé, champ `titre` absent → `None` |
-| `extract_location()` | `api.py` | Liste de dicts → ville extraite, string → première partie avant virgule |
+### Job 3 — `frontend` : lint + types + build
 
 ```yaml
-- name: Install dependencies
-  run: pip install -r backend/requirements.txt
-
-- name: Run tests
-  run: pytest backend/tests/ -v
+- run: npm ci
+- run: npm run lint        # ESLint (règles React Hooks incluses)
+- run: npm run typecheck   # tsc -b
+- run: npm run build       # build de production Vite
 ```
 
----
-
-### Job 3 — Lint (flake8)
-
-Vérifie la qualité syntaxique et le style du code Python.
+### Job 4 — `docker` : la stack complète démarre
 
 ```yaml
-- name: Lint with flake8
-  run: flake8 backend/ --max-line-length=120 --exclude=__pycache__
+- run: docker compose config --quiet
+- run: docker compose up -d --build --wait --wait-timeout 300
 ```
 
-**Pourquoi flake8 ?**
-Détecte les imports inutilisés, les variables non définies, et les violations de style PEP8. Intégré nativement dans les environnements Python sans configuration lourde.
+`--wait` attend que **tous les healthchecks** soient verts (MySQL, API, Nginx). Ensuite, des tests
+de fumée passent par Nginx comme un vrai utilisateur : santé, liste des offres, inscription,
+connexion, route protégée avec le jeton, route admin refusée (403). En cas d'échec, les journaux
+des conteneurs sont affichés ; la stack est toujours arrêtée à la fin (`down -v`).
 
 ---
 
@@ -86,12 +88,17 @@ Détecte les imports inutilisés, les variables non définies, et les violations
 ```yaml
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
     branches: [main]
-```
 
-Chaque PR vers `main` doit passer tous les jobs avant de pouvoir être mergée. Cela empêche l'introduction de régressions silencieuses.
+permissions:
+  contents: read          # le workflow ne peut rien modifier dans le dépôt
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true   # un nouveau push annule l'exécution précédente
+```
 
 ---
 
@@ -99,11 +106,13 @@ Chaque PR vers `main` doit passer tous les jobs avant de pouvoir être mergée. 
 
 | Risque | Protection |
 |---|---|
-| Dockerfile cassé après modification | Job build échoue immédiatement |
+| Dockerfile ou compose cassé | Job `docker` : la stack doit démarrer et être saine |
 | Régression sur l'auth (register/login) | Tests pytest sur les deux routes |
-| Normalisation WeLoveDevs corrompue | Test unitaire sur `normalize()` |
-| Code illisible / imports fantômes | Flake8 bloque la PR |
-| Merge accidentel sans review | CI obligatoire avant merge sur main |
+| Faille de contrôle d'accès | Tests 401 / 403 sur les routes admin et « propriétaire » |
+| Requête SQL invalide | Job `integration` sur MySQL 8 |
+| Normalisation WeLoveDevs corrompue | Tests unitaires de `collector.py` |
+| Erreur de typage / hook React mal utilisé | `tsc` + ESLint |
+| Code illisible / imports fantômes | flake8 |
 
 ---
 
@@ -119,8 +128,13 @@ Rejeté — les hooks locaux peuvent être contournés (`--no-verify`) ou ne pas
 
 ## Trade-offs
 
-**Pas de déploiement automatique (CD)** — Le pipeline s'arrête à la validation. Un déploiement automatisé en production nécessiterait un environnement cible stable (serveur, secrets de déploiement) qui dépasse le cadre du projet.
+**Pas de déploiement automatique (CD)** — Le pipeline s'arrête à la validation. Un déploiement
+automatisé nécessiterait un serveur cible et des secrets de déploiement, hors du cadre du projet.
 
-**Tests d'intégration limités** — Les tests des routes API nécessitent une base de données. Pour les garder rapides en CI, les tests utilisent des mocks ou une base SQLite en mémoire à la place de MySQL. Les tests end-to-end (Playwright, Cypress) ne sont pas inclus dans ce pipeline.
+**Le modèle d'IA n'est pas téléchargé en CI** — Les tests de recommandation utilisent un faux modèle
+(`tests/test_recommandations.py`) : on teste la logique de classement et de cache sans télécharger
+PyTorch ni le modèle. Le job `docker` installe bien PyTorch (version CPU) dans l'image, mais avec
+`WARMUP_MODEL=false` pour ne pas télécharger le modèle au démarrage.
 
-**`torch` dans les dépendances** — L'installation de PyTorch CPU en CI est longue (~2 min). L'usage du cache pip de GitHub Actions (`actions/cache`) réduit ce temps sur les exécutions suivantes.
+**Pas de tests end-to-end navigateur** — Les tests de fumée du job `docker` passent par l'API.
+Des tests Playwright seraient la prochaine étape.

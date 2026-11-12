@@ -44,10 +44,12 @@ async def lifespan(app: FastAPI):
 ```
 
 ### Base de données
-**MySQL 8.0** — base relationnelle avec schéma explicite défini dans `data.sql`, monté automatiquement au premier démarrage via `docker-entrypoint-initdb.d`.
+**MySQL 8.0** — base relationnelle avec schéma explicite défini dans `db/init.sql`, monté automatiquement au premier démarrage via `docker-entrypoint-initdb.d`.
 
 ### Conteneurisation
-**Docker + Docker Compose** — 5 services : `frontend`, `backend`, `db`, `phpmyadmin`, `fail2ban`.
+**Docker + Docker Compose** — 3 services toujours lancés (`frontend`, `backend`, `db`) et 2 services facultatifs
+activés par profil : `phpmyadmin` (`--profile tools`) et `fail2ban` (`--profile security`).
+Chaque service a un healthcheck et ne démarre que lorsque ses dépendances sont saines (`depends_on: service_healthy`).
 
 ---
 
@@ -56,13 +58,13 @@ async def lifespan(app: FastAPI):
 ```
 Internet
     │
-[Nginx - frontend :8080]
+[Nginx - frontend :8082]           seul port public
     │  /api/* → proxy
-[FastAPI - backend :8000]
+[FastAPI - backend :8000]          127.0.0.1 uniquement (Swagger /docs)
     │
-    ├── [MySQL - db]          (réseau backend_network)
-    ├── [phpMyAdmin :8081]    (127.0.0.1 uniquement)
-    └── [Fail2ban]            (network_mode: host)
+    ├── [MySQL - db]               réseau backend_network (internal : pas d'accès Internet)
+    ├── [phpMyAdmin :8081]         127.0.0.1 uniquement, profil « tools »
+    └── [Fail2ban]                 network_mode: host, profil « security »
 ```
 
 ### Segmentation réseau Docker
@@ -70,7 +72,7 @@ Internet
 | Réseau | Services |
 |---|---|
 | `frontend_network` | frontend ↔ backend |
-| `backend_network` | backend ↔ db ↔ phpmyadmin |
+| `backend_network` (`internal: true`) | backend ↔ db ↔ phpmyadmin |
 
 Le frontend n'a jamais accès direct à la base de données. PhpMyAdmin est uniquement accessible en local (`127.0.0.1:8081`).
 
@@ -80,9 +82,10 @@ Le frontend n'a jamais accès direct à la base de données. PhpMyAdmin est uniq
 
 | Fichier | Rôle |
 |---|---|
-| `api.py` | Point d'entrée FastAPI, routes dashboard, collecte WeLoveDevs, orchestration |
+| `api.py` | Point d'entrée FastAPI : démarrage, routes dashboard / candidatures / admin |
+| `collector.py` | Appels à l'API WeLoveDevs et normalisation des offres |
 | `routes.py` | Routes d'authentification (`/api/register`, `/api/login`) |
-| `auth.py` | Logique JWT et hachage bcrypt |
+| `auth.py` | JWT, hachage bcrypt, contrôle d'accès (propriétaire / admin), limite de tentatives |
 | `database_api.py` | Couche d'accès aux données (MySQL) |
 | `feature_ia.py` | Feature de recommandation par similarité sémantique |
 
@@ -107,4 +110,4 @@ Le frontend n'a jamais accès direct à la base de données. PhpMyAdmin est uniq
 
 **MySQL connector sans ORM** — Les requêtes SQL sont écrites manuellement dans `database_api.py`. Plus de contrôle mais plus de risque d'erreurs ; la protection contre les injections repose sur la paramétrisation systématique des requêtes (`cursor.execute(query, params)`).
 
-**Image `python:3.12-slim`** — Réduit la taille de l'image mais nécessite l'installation de toutes les dépendances au build, dont `torch` (CPU-only) qui est lourd. Le flag `--no-cache-dir` limite l'impact.
+**Image `python:3.12-slim`** — Réduit la taille de l'image mais nécessite l'installation de toutes les dépendances au build, dont `torch` (CPU-only) qui est lourd. Le flag `--no-cache-dir` et l'index PyTorch CPU (`requirements-ml.txt`) limitent l'impact.

@@ -10,7 +10,7 @@
 
 ## Contexte
 
-Le cahier des charges impose qu'au moins un output de la feature data et un output de la feature AI soient visibles sur le dashboard sans navigation supplémentaire. La plateforme **Jobify** doit aider un étudiant en informatique à piloter sa recherche d'emploi et à comprendre le marché tech, sans qu'il ait besoin de consulter plusieurs plateformes en parallèle.
+Le cahier des charges impose qu'au moins un output de la feature data et un output de la feature AI soient visibles sur le dashboard sans navigation supplémentaire. La plateforme **JobyFind** doit aider un étudiant en informatique à piloter sa recherche d'emploi et à comprendre le marché tech, sans qu'il ait besoin de consulter plusieurs plateformes en parallèle.
 
 ---
 

@@ -1,8 +1,8 @@
-# Schéma de la Base de Données — Jobify
+# Schéma de la Base de Données — JobyFind
 
 ## Vue d'ensemble
 
-Base de données relationnelle **MySQL 8.0**. Le schéma est initialisé automatiquement au premier démarrage du conteneur `db` via le fichier `data.sql` monté dans `/docker-entrypoint-initdb.d/`.
+Base de données relationnelle **MySQL 8.0**. Le schéma est initialisé automatiquement au premier démarrage du conteneur `db` via le fichier `db/init.sql` monté dans `/docker-entrypoint-initdb.d/`.
 
 ---
 
@@ -114,21 +114,21 @@ Base de données relationnelle **MySQL 8.0**. Le schéma est initialisé automat
 
 ## Persistance
 
-Les données MySQL sont stockées dans un volume Docker nommé `db_data`, monté sur `/var/lib/mysql` dans le conteneur. Ce volume **survit aux redémarrages** du conteneur (`restart: always`) et aux `docker-compose down` sans `--volumes`.
+Les données MySQL sont stockées dans un volume Docker nommé `db_data`, monté sur `/var/lib/mysql` dans le conteneur. Ce volume **survit aux redémarrages** du conteneur (`restart: unless-stopped`) et aux `docker compose down` sans `-v`.
 
 ```yaml
 # docker-compose.yml
 volumes:
-  db_data: {}
+  db_data:
 
 # service db
 volumes:
   - db_data:/var/lib/mysql
-  - ./data.sql:/docker-entrypoint-initdb.d/init.sql
+  - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 ```
 
 ---
 
 ## Initialisation automatique
 
-Le fichier `data.sql` est exécuté automatiquement par MySQL au premier démarrage si la base est vide. Il utilise `CREATE TABLE IF NOT EXISTS` et `INSERT IGNORE` pour être idempotent (ré-exécutable sans erreur).
+Le fichier `db/init.sql` est exécuté automatiquement par MySQL au premier démarrage si la base est vide. Il utilise `CREATE TABLE IF NOT EXISTS` et `INSERT IGNORE` pour être idempotent (ré-exécutable sans erreur).

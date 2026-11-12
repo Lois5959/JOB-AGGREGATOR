@@ -1,136 +1,178 @@
-# Documentation Sécurité — Job Aggregator
-## Vue d'ensemble
-Ce document décrit les choix de sécurité appliqués au projet Job Aggregator, conformément aux exigences du cahier des charges Epitech. Chaque mesure est présentée avec son Pourquoi, son Comment et ses Trade-offs.
+# Choix de sécurité — JobyFind
 
-1. Gestion des secrets
-## Pourquoi : 
-Les credentials en dur dans le code source sont une vulnérabilité critique (OWASP A02). Un secret exposé dans un dépôt Git peut être exploité immédiatement.
+Chaque mesure est présentée avec son **pourquoi**, son **comment** (fichier concerné) et ses **limites**.
+Tout ce qui est décrit ici est vérifié par des tests (`backend/tests/`) ou par la CI.
 
-## Comment : 
-Les secrets sont injectés via des variables d'environnement au démarrage des conteneurs. Le docker-compose.yml utilise la syntaxe ${VAR:-valeur_defaut} pour définir les valeurs de fallback en développement uniquement.
+---
 
-yaml# docker-compose.yml
-environment:
-  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-testroot}
-  MYSQL_DATABASE: ${MYSQL_DATABASE:-testdb}
-  MYSQL_USER: ${MYSQL_USER:-testuser}
-  MYSQL_PASSWORD: ${MYSQL_PASSWORD:-testpassword}
-  WELOVEDEVS_API_KEY: ${WELOVEDEVS_API_KEY:-dummy_key}
+## 1. Secrets
 
-## Trade-off : 
-Les valeurs par défaut facilitent le démarrage local mais ne doivent jamais être utilisées en production. La documentation de déploiement doit l'expliciter clairement.
+**Pourquoi.** Un secret écrit dans le code finit dans l'historique Git et peut être réutilisé
+par n'importe qui (OWASP A02).
 
-# 2. Authentification et sécurité des tokens (JWT)
-## Pourquoi : 
-Les routes sensibles doivent être protégées contre les accès non autorisés. L'authentification par token stateless convient bien à une API REST.
+**Comment.**
+- Tous les secrets viennent de variables d'environnement, lues depuis un fichier `.env`
+  qui n'est **jamais** versionné (`.gitignore`). Le dépôt fournit seulement `.env.example`.
+- `JWT_SECRET` : clé de signature des jetons. Si elle est absente, l'API génère une clé
+  aléatoire au démarrage (sans jamais l'afficher) et prévient dans les journaux : les sessions
+  sont alors perdues à chaque redémarrage — pratique en démo, à éviter en production.
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` : créent le premier compte administrateur au démarrage.
+  Aucun compte admin n'existe « par défaut » dans le code ou le SQL.
 
-## Comment : 
-L'authentification est implémentée dans auth.py avec trois composantes :
+**Limites.** Les valeurs par défaut de `docker-compose.yml` (`change-me-…`) servent uniquement au
+démarrage local et doivent être remplacées dans `.env` pour tout déploiement.
 
-Hachage des mots de passe avec bcrypt via passlib, avec truncate_error=False pour éviter les silences sur les mots de passe trop longs.
-Génération de tokens JWT signés avec HMAC-SHA256 (HS256), incluant une expiration de 30 minutes.
-Vérification du mot de passe soumis contre le haché stocké en base.
+---
 
-python# auth.py
-pwd_contenue = CryptContext(schemes=["bcrypt"], deprecated="auto", truncate_error=False)
-SECRET_KEY = "***SECRET-RETIRE***"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+## 2. Mots de passe et jetons JWT
 
-## Trade-off : 
-La SECRET_KEY est actuellement définie en dur dans le fichier source — elle doit être déplacée vers une variable d'environnement avant tout déploiement en production. Les tokens JWT ne peuvent pas être révoqués avant expiration sans mécanisme de blacklist supplémentaire.
+**Pourquoi.** Les routes sensibles doivent savoir *qui* appelle, sans stocker de session côté serveur.
 
-# 3. Mitigation des attaques par force brute (Fail2ban)
-## Pourquoi : 
-Sans protection, un attaquant peut tenter un nombre illimité de combinaisons login/mot de passe sur le endpoint /login.
+**Comment** (`backend/auth.py`, `backend/routes.py`).
+- Mots de passe hachés avec **bcrypt** (`passlib`) ; longueur imposée entre 8 et 128 caractères.
+- Jetons **JWT HS256** signés avec `JWT_SECRET`, expiration configurable
+  (`JWT_EXPIRE_MINUTES`, 30 min par défaut).
+- Côté front, le jeton est envoyé dans l'en-tête `Authorization: Bearer …` par un client unique
+  (`front-end/src/lib/api.ts`). Un `401` efface le jeton et renvoie vers l'écran de connexion.
 
-## Comment : 
-Fail2ban est déployé comme service Docker et surveille les logs applicatifs. La configuration est composée de trois fichiers :
-jail.local — définit la jail pour l'application :
+**Limites.** Un jeton ne peut pas être révoqué avant son expiration (pas de liste noire).
+Il est stocké dans `localStorage`, donc lisible par un script injecté : d'où l'importance
+de la protection XSS (section 6) et de la CSP (section 7).
 
-ini[jobaggregator]
-enabled  = true
-port     = 8000
-filter   = jobaggregator
-logpath  = /var/log/jobaggregator/app.log
+---
+
+## 3. Contrôle d'accès
+
+**Pourquoi.** Être connecté ne doit pas suffire pour lire les données d'un autre utilisateur
+ou pour administrer la plateforme (OWASP A01).
+
+**Comment** (`backend/auth.py`).
+
+| Dépendance FastAPI | Règle |
+|---|---|
+| `get_current_user` | Jeton valide obligatoire, sinon `401`. |
+| `ensure_self_or_admin` | L'email visé doit être celui du jeton (ou l'appelant est admin), sinon `403`. |
+| `require_admin` | Le rôle est **relu en base** à chaque appel, sinon `403`. |
+
+Conséquences concrètes, toutes testées :
+- un utilisateur ne peut ni lire ni modifier le profil, les candidatures ou les recommandations d'un autre ;
+- un jeton modifié à la main est rejeté (signature invalide) ; et même un jeton **correctement
+  signé** qui annonce `role_id: 2` ne suffit pas, car le rôle est relu en base ;
+- l'inscription crée toujours un compte « utilisateur » : impossible de s'inscrire admin ;
+- un admin ne peut pas supprimer son propre compte (`400`).
+
+Le front masque le menu Admin aux non-admins, mais ce n'est pas une mesure de sécurité :
+tout est vérifié côté serveur.
+
+---
+
+## 4. Force brute sur la connexion — deux niveaux
+
+**Pourquoi.** Sans limite, un attaquant peut essayer des milliers de mots de passe.
+
+**Niveau 1 — dans l'API (toujours actif).** `LoginRateLimiter` (`backend/auth.py`) compte les
+échecs par IP : après **5 échecs en 10 minutes**, `/api/login` répond `429` avec un en-tête
+`Retry-After`. Une connexion réussie remet le compteur à zéro. Réglable avec
+`LOGIN_MAX_ATTEMPTS` et `LOGIN_WINDOW_SECONDS`.
+
+**Niveau 2 — fail2ban (profil `security`, Linux).** Chaque échec écrit une ligne dans
+`/var/log/jobaggregator/app.log` (volume Docker partagé) :
+
+```
+203.0.113.7 - "POST /api/login HTTP/1.1" 401
+```
+
+fail2ban lit ce fichier et bannit l'IP au niveau du pare-feu (chaîne `DOCKER-USER`) :
+
+```ini
+# fail2ban/filter.d/jobaggregator.conf
+failregex = ^<HOST> - "POST /api/login HTTP/1\.1" 401$
+
+# fail2ban/jail.d/jobaggregator.local
 maxretry = 5
+findtime = 600
 bantime  = 600
+port     = 80,443,8000
+chain    = DOCKER-USER
+```
 
-→ Après 5 tentatives échouées, l'IP est bannie pendant 10 minutes.
-jobaggregator.conf — définit le pattern de détection :
+**IP réelle du client.** Nginx **remplace** l'en-tête `X-Forwarded-For` par l'adresse qu'il voit
+(`$remote_addr`) au lieu de le compléter : un client ne peut donc pas envoyer une fausse IP
+pour contourner la limite. Uvicorn est lancé avec `--proxy-headers` pour lire cette IP.
 
-ini[Definition]
-failregex = ^<HOST> -.*"POST /login.*" 401
+**Limites.** Le compteur du niveau 1 est en mémoire : il repart à zéro au redémarrage et n'est
+pas partagé entre plusieurs instances (il faudrait Redis). fail2ban a besoin de
+`network_mode: host` et de `NET_ADMIN` pour modifier iptables, et ne fonctionne pas sous
+Docker Desktop (macOS / Windows). Des utilisateurs derrière la même IP (NAT d'entreprise)
+partagent le même compteur.
 
-ignoreregex =
-→ Chaque réponse 401 sur POST /login incrémente le compteur de l'IP source.
-docker-compose.yml — monte les logs et la config dans le conteneur Fail2ban :
-yamlfail2ban:
-  image: crazymax/fail2ban:latest
-  network_mode: "host"
-  cap_add:
-    - NET_ADMIN
-    - NET_RAW
-  volumes:
-    - ./backend/logs:/var/log/jobaggregator
-    - ./etc/fail2ban:/etc/fail2ban
+---
 
-## Trade-off : 
-network_mode: host est nécessaire pour que Fail2ban puisse manipuler iptables, mais supprime l'isolation réseau du conteneur. Les IPs légitimes derrière un proxy partagé (NAT d'entreprise) pourraient être bloquées collectivement. Un findtime plus long ou un maxretry plus élevé pourrait être envisagé selon le contexte.
+## 5. Injections SQL et validation des entrées
 
-# 4. Reverse proxy et isolation réseau (Nginx)
-## Pourquoi : 
-Exposer le backend directement sur Internet augmente la surface d'attaque. Un reverse proxy permet de centraliser le routage, masquer la topologie interne et faciliter l'ajout de TLS.
+**Pourquoi.** L'injection SQL reste l'une des failles les plus exploitées (OWASP A03).
 
-## Comment : 
-Nginx sert le frontend statique et proxifie les appels /api/ vers le backend, en transmettant l'IP réelle du client pour que Fail2ban puisse l'identifier.
+**Comment.**
+- Pas d'ORM : toutes les requêtes de `backend/database_api.py` sont **paramétrées**
+  (`cursor.execute(query, params)`), aucune valeur n'est concaténée dans le SQL.
+- Les corps de requête sont validés par **Pydantic** (email valide, longueurs maximales).
+- Les fichiers de candidature sont limités aux extensions `.pdf`, `.doc`, `.docx`, `.odt`
+  et à 5 Mo (`400` / `413`) ; Nginx refuse les requêtes de plus de 12 Mo.
 
-nginx# nginx.conf
-location /api/ {
-    proxy_pass http://backend:8000/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-}
-Le réseau Docker est segmenté en deux sous-réseaux :
+**Limites.** Le contrôle des fichiers porte sur l'extension et la taille, pas sur le contenu.
+Les fichiers ne sont pas conservés sur le serveur, ce qui limite le risque.
 
-frontend_network : frontend ↔ backend
-backend_network : backend ↔ db ↔ phpmyadmin
+---
 
-PhpMyAdmin est exclusivement accessible depuis 127.0.0.1:8081, jamais exposé sur l'interface publique.
-yamlphpmyadmin:
-  ports:
-    - "127.0.0.1:8081:80"  # Accès local uniquement
+## 6. XSS (injection de script dans les pages)
 
-## Trade-off : 
-La configuration actuelle tourne en HTTP. En production, il faudrait ajouter TLS (Let's Encrypt / Certbot) et forcer la redirection HTTP → HTTPS.
+**Pourquoi.** Les descriptions d'offres viennent d'une API externe : elles peuvent contenir du HTML.
 
-# 5. Contrôle d'accès par rôles (RBAC)
-## Pourquoi : 
-Tous les utilisateurs ne doivent pas avoir accès aux fonctionnalités d'administration (modération des offres, gestion des utilisateurs).
+**Comment.**
+- À la collecte, `texte_brut()` (`backend/collector.py`) retire les balises `<script>` / `<style>`
+  et tout le HTML, puis décode les entités : on stocke du **texte**.
+- Côté front, la description est affichée comme du texte (pas de `dangerouslySetInnerHTML`).
+- Deux protections valent mieux qu'une : même si une description HTML arrivait en base,
+  React l'afficherait sans l'exécuter.
 
-## Comment : 
-Le modèle de données inclut un champ role sur la table users (valeurs : user, admin). Les routes sensibles vérifient le rôle côté serveur via un middleware d'autorisation appliqué après la validation du token JWT. Le contrôle est strictement server-side ; le frontend n'affiche que les éléments autorisés mais cette restriction n'est pas considérée comme une mesure de sécurité en elle-même.
+---
 
-## Trade-off : 
-Un système RBAC plus granulaire (permissions par ressource) aurait été plus flexible, mais ajoute de la complexité de gestion. Le modèle à deux rôles couvre les besoins du projet.
+## 7. Nginx, réseau et conteneurs
 
-# 6. Protection contre les injections
-## Pourquoi : 
-Les injections SQL (OWASP A03) sont l'une des vulnérabilités les plus exploitées sur les applications web.
+**Pourquoi.** Moins il y a de choses exposées, moins il y a de choses à attaquer.
 
-## Comment :
-L'ORM utilisé (SQLAlchemy / équivalent) paramètre automatiquement toutes les requêtes, éliminant le risque d'injection par concaténation de chaînes. Les inputs utilisateur sont également validés via un schéma Pydantic avant tout traitement ou persistance.
+**Comment.**
+- **Un seul port public** : Nginx sur `8082`. L'API (`8000`) et phpMyAdmin (`8081`) ne sont
+  publiés que sur `127.0.0.1`.
+- `backend_network` est déclaré `internal: true` : la base de données n'a aucun accès à Internet
+  et n'est joignable que par l'API (et phpMyAdmin si le profil `tools` est lancé).
+- En-têtes ajoutés par Nginx (`front-end/nginx.conf`) : `Content-Security-Policy` (scripts
+  uniquement depuis le site, liste fermée de domaines pour la carte et le géocodage),
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`,
+  `Permissions-Policy`, et `server_tokens off` (version de Nginx masquée).
+- L'image de l'API tourne avec un **utilisateur non-root** (`appuser`, uid 10001).
+- Chaque service a un **healthcheck** ; l'API ne démarre que quand MySQL est prêt, Nginx
+  que quand l'API est prête.
+- CORS : seules les origines listées dans `CORS_ORIGINS` sont acceptées, sans cookies.
 
-## Trade-off : 
-La validation applicative ne remplace pas les contraintes d'intégrité au niveau de la base de données (clés étrangères, contraintes NOT NULL), qui sont également définies dans le schéma SQL.
+**Limites.** La stack tourne en HTTP. En production, il faut ajouter TLS (Let's Encrypt)
+devant Nginx et rediriger HTTP vers HTTPS. La CSP autorise `'unsafe-inline'` pour les styles,
+car React et Leaflet utilisent des attributs `style`.
 
-# Résumé des menaces couvertes
-## Menace                                   Contrôle appliqué 
-Secrets exposés                          Variables d'environnement + .gitignore
-Mots de passe en clair                   Hachage bcrypt
-Tokens falsifiés                         JWT signé HS256 + expiration 30 min
-Force brute sur /login                   Fail2ban (5 tentatives → ban 10 min)
-Accès non autorisé aux routes            JWT + vérification de rôle server-side
-Exposition de la base de données         Réseau Docker isolé + phpMyAdmin local uniquement
-Injection SQL                            ORM paramétré + validation Pydantic
-Surface d'attaque du backend             Reverse proxy Nginx
+---
+
+## Résumé
+
+| Menace | Contrôle | Où |
+|---|---|---|
+| Secrets dans le dépôt | Variables d'environnement, `.env` ignoré par Git | `.env.example`, `.gitignore` |
+| Mots de passe volés en base | bcrypt | `auth.py` |
+| Jeton falsifié ou expiré | JWT HS256 signé + expiration | `auth.py` |
+| Accès aux données d'un autre | `ensure_self_or_admin` | `auth.py`, `api.py` |
+| Élévation de privilèges | Rôle relu en base, inscription toujours « utilisateur » | `auth.py`, `routes.py` |
+| Force brute | Limite par IP (429) + fail2ban | `auth.py`, `fail2ban/` |
+| Usurpation d'IP via en-tête | Nginx écrase `X-Forwarded-For` | `nginx.conf` |
+| Injection SQL | Requêtes paramétrées + Pydantic | `database_api.py` |
+| XSS | HTML retiré à la collecte + affichage en texte + CSP | `collector.py`, `Research.tsx`, `nginx.conf` |
+| Base exposée | Réseau Docker interne, ports liés à `127.0.0.1` | `docker-compose.yml` |
+| Conteneur compromis | Utilisateur non-root dans l'image de l'API | `backend/Dockerfile` |
